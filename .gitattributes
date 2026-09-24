@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.tsv -text
+*.zip binary
+*.pdf binary

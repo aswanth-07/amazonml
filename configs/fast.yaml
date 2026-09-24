@@ -1,0 +1,10 @@
+# Quick iteration: fewer folds and rounds, coarser threshold grid.
+# ber cv --config configs/fast.yaml
+model:
+  n_folds: 3
+  num_boost_round: 500
+  early_stopping_rounds: 50
+decision:
+  grid_step: 0.02
+blocking:
+  max_candidates: 30

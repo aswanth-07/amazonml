@@ -1,0 +1,92 @@
+# Default configuration. Mirrors the dataclass defaults in ber/config.py
+# (tests/test_config.py fails if the two drift). Copy this file to create an
+# experiment config, or override single keys with --set key.path=value.
+
+seed: 42
+beta: 0.5                    # F-beta of the leaderboard (precision-heavy)
+output_dir: output
+runs_dir: runs
+artifacts_dir: artifacts
+
+data:
+  data_dir: dataset          # expects dataset/train/... and dataset/test/...
+  quoting: none              # none: quotes are literal text; minimal: honour CSV quoting
+
+normalize:
+  transliterate: true        # anyascii for non-Latin scripts; accents are always folded
+
+blocking:
+  partition_by_country: true # candidates share the S1 record's country (unknown country joins all)
+  max_candidates: 50         # cap per S1 entity after the union; this set is candidate_pairs.tsv
+  memory_budget_mb: 512      # dense similarity chunk budget for top-k search
+  tfidf:
+    - name: name_char
+      field: name_core
+      analyzer: char_wb
+      ngram_range: [2, 4]
+      top_k: 30
+      min_df: 1
+      max_df: 0.5
+      min_sim: 0.05
+      cap_weight: 0.6
+    - name: addr_char
+      field: addr_core
+      analyzer: char_wb
+      ngram_range: [2, 4]
+      top_k: 30
+      min_df: 1
+      max_df: 0.5
+      min_sim: 0.05
+      cap_weight: 0.4
+    - name: full_word
+      field: full_text
+      analyzer: word
+      ngram_range: [1, 2]
+      top_k: 20
+      min_df: 1
+      max_df: 0.5
+      min_sim: 0.05
+      cap_weight: 0.0
+  keys:
+    - name: postal_name      # same postal code and same first two letters of the core name
+      key: postal_name
+      max_block_size: 200
+    - name: acronym          # "IBM" <-> "International Business Machines"
+      key: acronym
+      max_block_size: 50
+  embedding:                 # optional dense blocker; see README "Optional: dense embeddings"
+    enabled: false
+    model_name: intfloat/multilingual-e5-small
+    local_path: models/multilingual-e5-small
+    field: raw_text          # original name + address; the encoder sees accents and all
+    prefix: "query: "
+    top_k: 20
+    min_sim: 0.5
+    batch_size: 256
+    device: cuda
+
+model:
+  kind: lightgbm             # lightgbm | hgb
+  n_folds: 5                 # GroupKFold over S1 entities for out-of-fold scoring
+  num_boost_round: 2000
+  early_stopping_rounds: 100
+  final_rounds_multiplier: 1.1
+  params:
+    objective: binary
+    learning_rate: 0.05
+    num_leaves: 63
+    min_data_in_leaf: 20
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    lambda_l2: 1.0
+    verbosity: -1
+
+decision:
+  strategy: threshold        # threshold | expected_f
+  exclusive: true            # each S2/S3 record is given to at most one S1 entity
+  threshold: null            # null: tuned on out-of-fold predictions for macro F-beta
+  grid_min: 0.02
+  grid_max: 0.98
+  grid_step: 0.01
+  max_matches_per_s1: null

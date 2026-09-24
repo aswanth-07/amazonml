@@ -1,0 +1,12 @@
+# Adds the dense-embedding blocker (multilingual, MIT licence, ~118M parameters).
+# One-time setup:  pip install torch (cu128 wheels for RTX 50xx), pip install -e ".[embed]",
+#                  ber fetch-model intfloat/multilingual-e5-small
+# Then:            ber cv --config configs/embeddings.yaml
+blocking:
+  embedding:
+    enabled: true
+    model_name: intfloat/multilingual-e5-small
+    local_path: models/multilingual-e5-small
+    top_k: 20
+    min_sim: 0.5
+    device: cuda
