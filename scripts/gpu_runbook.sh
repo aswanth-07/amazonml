@@ -11,6 +11,8 @@
 #   bash scripts/gpu_runbook.sh runA      # blocking, features, stage 1+2, lw groups  3-5 h cold (CPU)
 #   bash scripts/gpu_runbook.sh ce        # pairwise cross-encoder (GPU; can start once
 #                                         #   artifacts/cache/train_blocking_*.joblib exists)  ~40 min
+#   bash scripts/gpu_runbook.sh groups    # listwise training groups from the raw data (CPU,
+#                                         #   no run needed; encoder share)            ~15-25 min
 #   bash scripts/gpu_runbook.sh lw        # listwise reranker (GPU)                   ~20-40 min small
 #   bash scripts/gpu_runbook.sh lweval    # quick comparison: p1 vs CE vs listwise    ~10 min
 #   bash scripts/gpu_runbook.sh runB      # stage 2 with CE + listwise, saves stage-2 inputs  ~1.5-2 h
@@ -25,6 +27,8 @@
 #   LW_INIT  encoder the listwise model starts from          (models/ce-small-v2)
 #   LW_MODEL where the listwise model goes                   (models/lw-small)
 #   CE_MODEL pairwise cross-encoder                          (models/ce-small-v2)
+#   GROUPS   listwise training groups (artifacts/lw_groups_enc.npz from `groups`, else
+#            run A's lw_groups_train.npz)
 set -euo pipefail
 
 STEP=${1:-help}
@@ -49,6 +53,11 @@ COMMON=(--config src/ber/configs/full.yaml --data-dir "$DATA"
         --set "scale.n_jobs=$((NCPU / 2))")
 
 latest_run() { ls -td runs/*-"$1" 2>/dev/null | head -1; }
+groups_file() {
+  if [ -n "${GROUPS:-}" ]; then echo "$GROUPS"
+  elif [ -f artifacts/lw_groups_enc.npz ]; then echo artifacts/lw_groups_enc.npz
+  else echo "$(latest_run A)/lw_groups_train.npz"; fi
+}
 
 case "$STEP" in
 setup)
@@ -92,17 +101,20 @@ ce)
   $PY -m ber.crossenc train --data-dir "$DATA" --init models/e5-small-ft --blocking "$BLOCK" \
       --model "$CE_MODEL" --knn artifacts/emb/train_knn.npz --max-pairs 4000000 --batch 256
   ;;
+groups)
+  # encoder-share entities: the matcher's holdout stays exactly as in every other run
+  $PY scripts/make_lw_groups.py --data-dir "$DATA" --out artifacts/lw_groups_enc.npz \
+      --train "${LW_TRAIN:-400000}" --valid 30000
+  ;;
 lw)
-  RUN_A=$(latest_run A)
   [ -f "$LW_INIT/config.json" ] || { echo "!! $LW_INIT missing (run 'ce' first or set LW_INIT)"; exit 1; }
-  $PY -m ber.listwise train --data-dir "$DATA" --groups "$RUN_A/lw_groups_train.npz" \
+  $PY -m ber.listwise train --data-dir "$DATA" --groups "$(groups_file)" \
       --init "$LW_INIT" --model "$LW_MODEL" --batch "${BATCH:-32}" --epochs "${EPOCHS:-1}" \
       --lr "${LR:-3e-5}" ${GRAD_CKPT:+--grad-ckpt}
   cat "$LW_MODEL/listwise.json"
   ;;
 lweval)
-  RUN_A=$(latest_run A)
-  $PY -m ber.listwise eval --data-dir "$DATA" --groups "$RUN_A/lw_groups_train.npz" \
+  $PY -m ber.listwise eval --data-dir "$DATA" --groups "$(groups_file)" \
       --model "$LW_MODEL" --ce "$CE_MODEL" --max-entities 60000 | tee "runs/lweval_$(basename "$LW_MODEL").json"
   echo "gate: lw auc >= ce auc - 0.0002, and blend:lw+p1 macro_f05_proxy > blend:ce+p1 -> keep it"
   ;;

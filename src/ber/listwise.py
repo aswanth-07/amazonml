@@ -42,7 +42,6 @@ from pathlib import Path
 import numpy as np
 
 from ber import schema
-from ber.embed import load_frames
 
 log = logging.getLogger("ber.listwise")
 
@@ -313,17 +312,49 @@ class _Encoder:
         return min(n + len(g.idx) + 2, self.max_len)
 
 
+def texts_at(data_dir, split: str, need1: np.ndarray, needp: np.ndarray):
+    """("name | address" of the sorted Source 1 positions ``need1``, the same of the sorted
+    pool positions ``needp``, number of S1 records, number of pool records), read in chunks
+    so memory holds only the needed texts (a full train frame is ~5 GB). Parsing matches
+    ``ber.io.read_tsv``; pool positions run over Source 2 then Source 3, as in ber.scale."""
+    import csv
+
+    import pandas as pd
+
+    read = {"sep": "\t", "dtype": str, "keep_default_na": False, "na_filter": False,
+            "quoting": csv.QUOTE_NONE, "encoding": "utf-8-sig", "chunksize": 500_000,
+            "usecols": [schema.NAME, schema.ADDRESS]}  # fmt: skip
+    root = Path(data_dir) / split
+
+    def collect(files: list[Path], positions: np.ndarray):
+        out: list[str] = []
+        offset = 0
+        for f in files:
+            for chunk in pd.read_csv(f, **read):
+                hi = offset + len(chunk)
+                sel = positions[(positions >= offset) & (positions < hi)] - offset
+                if len(sel):
+                    n = chunk[schema.NAME].to_numpy()[sel]
+                    a = chunk[schema.ADDRESS].to_numpy()[sel]
+                    out += [f"{x.strip()} | {y.strip()}" for x, y in zip(n, a)]
+                offset = hi
+        return out, offset
+
+    s1_text, n1 = collect([root / schema.source_file(split, 1)], need1)
+    pool_text, npool = collect([root / schema.source_file(split, s) for s in (2, 3)], needp)
+    return s1_text, pool_text, n1, npool
+
+
 def _stores(tok, data_dir, split, rows, cols, len_s1, len_cand):
     """Token stores for the Source 1 and pool records these pairs use, and position -> slot maps."""
-    s1, pool = load_frames(data_dir, split)
     t0 = time.time()
     need1, needp = np.unique(rows), np.unique(cols)
-    s1_text, pool_text = texts(s1), texts(pool)
-    s1_store = TokenStore(tok, [s1_text[i] for i in need1], len_s1)
-    pool_store = TokenStore(tok, [pool_text[i] for i in needp], len_cand)
-    s1_slot = np.full(len(s1), -1, np.int64)
+    s1_text, pool_text, n1, npool = texts_at(data_dir, split, need1, needp)
+    s1_store = TokenStore(tok, s1_text, len_s1)
+    pool_store = TokenStore(tok, pool_text, len_cand)
+    s1_slot = np.full(n1, -1, np.int64)
     s1_slot[need1] = np.arange(len(need1))
-    pool_slot = np.full(len(pool), -1, np.int64)
+    pool_slot = np.full(npool, -1, np.int64)
     pool_slot[needp] = np.arange(len(needp))
     log.info("tokenised %d Source 1 and %d pool records in %.0fs", len(need1), len(needp),
              time.time() - t0)  # fmt: skip

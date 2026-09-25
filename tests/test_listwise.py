@@ -295,3 +295,47 @@ def test_listwise_scorer_reads_whole_groups_even_with_a_band(synthetic_dir, tmp_
     unsure = gated & (out["ce"] > 0.3) & (out["ce"] < 0.8)
     with np.load(tmp_path / "train_ce2_pairs.npz") as z:
         assert len(z["rows"]) == unsure.sum()  # the band still applies to pairwise models
+
+
+def test_chunked_text_loader_matches_the_full_frames(synthetic_dir):
+    from ber.embed import load_frames
+    from ber.listwise import texts, texts_at
+
+    s1, pool = load_frames(synthetic_dir, "train")
+    rng = np.random.default_rng(2)
+    need1 = np.sort(rng.choice(len(s1), 50, replace=False))
+    needp = np.sort(rng.choice(len(pool), 80, replace=False))
+    a, b, n1, npool = texts_at(synthetic_dir, "train", need1, needp)
+    assert (n1, npool) == (len(s1), len(pool))
+    assert a == [texts(s1)[i] for i in need1] and b == [texts(pool)[i] for i in needp]
+
+
+def test_groups_from_raw_data_hold_every_true_copy_and_same_country_negatives(
+    synthetic_dir, tmp_path
+):
+    from ber.embed import countries, encoder_mask, load_frames, truth_pairs
+
+    out = tmp_path / "g.npz"
+    subprocess.run(
+        [sys.executable, str(Path(__file__).parents[1] / "scripts" / "make_lw_groups.py"),
+         "--data-dir", str(synthetic_dir), "--out", str(out), "--train", "300", "--valid", "60"],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    z = np.load(out)
+    s1, pool = load_frames(synthetic_dir, "train")
+    a, b = truth_pairs(synthetic_dir, s1, pool)
+    enc = encoder_mask(s1["entity_id"].to_numpy())
+    train, valid = z["train"], z["valid"]
+    assert (
+        train.sum() == min(300, enc.sum()) and not (train & ~enc).any() and not (valid & enc).any()
+    )
+    rows, cols, labels = z["rows"], z["cols"], z["labels"]
+    picked = train | valid
+    truth = set(zip(a[picked[a]].tolist(), b[picked[a]].tolist()))
+    assert set(zip(rows[labels].tolist(), cols[labels].tolist())) == truth  # every true copy
+    owner = dict(zip(b.tolist(), a.tolist()))
+    assert all(owner.get(c, -1) != r for r, c in zip(rows[~labels], cols[~labels]))
+    c1, cp = countries(s1), countries(pool)
+    assert (c1[rows] == cp[cols]).all()
+    assert (~labels).sum() > 0 and (z["p1"] >= 0.05).all()
+    assert np.array_equal(z["n_true"], np.bincount(a, minlength=len(s1)))
