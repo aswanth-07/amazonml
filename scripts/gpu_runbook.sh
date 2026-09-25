@@ -15,6 +15,9 @@
 #                                         #   no run needed; encoder share)            ~15-25 min
 #   bash scripts/gpu_runbook.sh lw        # listwise reranker (GPU)                   ~20-40 min small
 #   bash scripts/gpu_runbook.sh lweval    # quick comparison: p1 vs CE vs listwise    ~10 min
+#   bash scripts/gpu_runbook.sh pgroups   # C7 pool-side groups from the raw data (CPU) ~20-30 min
+#   bash scripts/gpu_runbook.sh lwp       # C7 pool-side listwise (GPU)               ~30-60 min small
+#   bash scripts/gpu_runbook.sh lwpeval   # C7 owner accuracy vs p1 proxy and CE      ~10 min
 #   bash scripts/gpu_runbook.sh runB      # stage 2 with CE + listwise, saves stage-2 inputs  ~1.5-2 h
 #   bash scripts/gpu_runbook.sh search    # every stage-2 model combination (CPU)     ~1-3 h
 #   bash scripts/gpu_runbook.sh final EXCLUDE=... [MONO=true]   # the submission   ~1 h (scores cached)
@@ -26,6 +29,7 @@
 #   SAMPLE   stage-1/2 training entities                     (500000)
 #   LW_INIT  encoder the listwise model starts from          (models/ce-small-v2)
 #   LW_MODEL where the listwise model goes                   (models/lw-small)
+#   LWP_MODEL where the pool-side listwise model goes        (models/lwp-small)
 #   CE_MODEL pairwise cross-encoder                          (models/ce-small-v2)
 #   GROUPS   listwise training groups (artifacts/lw_groups_enc.npz from `groups`, else
 #            run A's lw_groups_train.npz)
@@ -42,6 +46,7 @@ SHARE=${SHARE:-0.5}
 SAMPLE=${SAMPLE:-500000}
 LW_INIT=${LW_INIT:-models/ce-small-v2}
 LW_MODEL=${LW_MODEL:-models/lw-small}
+LWP_MODEL=${LWP_MODEL:-models/lwp-small}
 CE_MODEL=${CE_MODEL:-models/ce-small-v2}
 NCPU=$(nproc)
 export PYTHONPATH=src
@@ -118,9 +123,25 @@ lweval)
       --model "$LW_MODEL" --ce "$CE_MODEL" --max-entities 60000 | tee "runs/lweval_$(basename "$LW_MODEL").json"
   echo "gate: lw auc >= ce auc - 0.0002, and blend:lw+p1 macro_f05_proxy > blend:ce+p1 -> keep it"
   ;;
+pgroups)
+  $PY scripts/make_lw_groups.py --data-dir "$DATA" --out artifacts/lwp_groups_enc.npz --side pool \
+      --train "${LWP_TRAIN:-800000}" --valid 30000
+  ;;
+lwp)
+  [ -f "$LW_INIT/config.json" ] || { echo "!! $LW_INIT missing (run 'ce' first or set LW_INIT)"; exit 1; }
+  $PY -m ber.listwise train --data-dir "$DATA" --groups artifacts/lwp_groups_enc.npz \
+      --init "$LW_INIT" --model "$LWP_MODEL" --batch "${BATCH:-32}" --epochs "${EPOCHS:-1}" \
+      --lr "${LR:-3e-5}" ${GRAD_CKPT:+--grad-ckpt}
+  cat "$LWP_MODEL/listwise.json"
+  ;;
+lwpeval)
+  $PY -m ber.listwise eval --data-dir "$DATA" --groups artifacts/lwp_groups_enc.npz \
+      --model "$LWP_MODEL" --ce "$CE_MODEL" --max-entities 60000 | tee "runs/lwpeval_$(basename "$LWP_MODEL").json"
+  echo "gate: lwp owner_accuracy above the CE's and the blend's -> keep it"
+  ;;
 runB)
   RUN_A=$(latest_run A)
-  MODELS=${MODELS:-$CE_MODEL,$LW_MODEL}
+  MODELS=${MODELS:-$CE_MODEL,$LW_MODEL,$LWP_MODEL}
   $PY -m ber.cli run "${COMMON[@]}" --out-dir output-B --tag B \
       --set "scale.stage1_model=$RUN_A/scale_model.joblib" --set "scale.ce_model=$MODELS" \
       --set scale.save_stage2=true
@@ -142,7 +163,7 @@ search)
   ;;
 final)
   RUN_A=$(latest_run A)
-  MODELS=${MODELS:-$CE_MODEL,$LW_MODEL}
+  MODELS=${MODELS:-$CE_MODEL,$LW_MODEL,$LWP_MODEL}
   $PY -m ber.cli run "${COMMON[@]}" --out-dir output-final --tag final \
       --set "scale.stage1_model=$RUN_A/scale_model.joblib" --set "scale.ce_model=$MODELS" \
       --set "scale.stage2_exclude=${EXCLUDE:-}" --set "scale.stage2_monotone=${MONO:-false}"
