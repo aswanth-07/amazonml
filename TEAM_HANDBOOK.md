@@ -4,7 +4,48 @@ Read this first, whether you are a teammate or an agent working for one. It says
 what the task is, what has been built, what it scores, how to run it, what was
 learned, and which open directions are free for a branch to take.
 
-Last updated 2026-09-25 17:05 IST.
+Last updated 2026-09-26 00:45 IST.
+
+---
+
+## TODO
+
+### Nikhil: listwise reranker (v6 candidate), due 26 Sep 14:00 IST
+
+The listwise group reranker (idea C1: one S1 record read together with all its
+candidates, pair head plus group head) is the strongest idea we have not measured yet.
+It exists only on your local branch `listwise-reranker`. v6 is built on the 26th from
+whatever beats v5 on holdout, so it has to be trained and measured by early afternoon.
+
+1. **Rebase onto current `main` and push the branch.** It branched at `a70d538`; since
+   then `main` changed `src/ber/scale.py`:
+   - pool-side cross-encoder context (`scale.ce_pool_context`): the same idea as your
+     E1, so keep one implementation, main's;
+   - `scale.ce_band`: cross-encoders after the first score only the pairs the first is
+     unsure of;
+   - `scale.ce_train_all`;
+   - orphan simulation (`scale.drop_s1_share`);
+   - name-cluster features (`FEATURE_VERSION` 4) and `scale.feature_donor_run`.
+
+   Resolve conflicts in favour of main's behaviour and keep your scorer dispatch
+   (`"kind": "listwise"`). Then run `pytest -q` and `ruff check src tests scripts`; both
+   must be clean.
+2. **Train C1 on your GPU tonight** (`scripts/gpu_runbook.sh lw`). Train only on the
+   encoder share or the listwise share, never on holdout entities.
+3. **Measure it against v5**, on the same holdout definition, with
+   `scale.drop_s1_share=0.186`: v4 scored 0.99001 there, and v5 will be added to
+   section 2 in the morning. Either add the listwise model to `scale.ce_model` after
+   v5's two cross-encoders, or run your stage-2 search (F1) over the saved stage-2 inputs.
+4. **Deliver:** the pushed branch, the exact training command, and the holdout macro
+   F0.5 with and without the listwise columns. The lead folds it into v6 if it wins.
+
+**Stretch: C7, pool-side listwise** (one pool record against its S1 suitors: which one
+owns it, or none). It targets our weakest group: businesses whose best candidate has no
+address score 0.882 on holdout, against 0.991 overall.
+
+Rules as always: models MIT or Apache-2.0 and at most 8B parameters, no external data,
+report holdout macro F0.5, and do not upload to the portal without telling the lead. If
+you need v5's `train_scores.npz`, the blocking caches or the embeddings, ask the lead.
 
 ---
 
@@ -33,10 +74,10 @@ Full brief: [docs/problem_statement.md](docs/problem_statement.md).
 | **v1 baseline** (tag `v1-baseline`, commit 4ddca44) | token blocking + LightGBM + stacked LightGBM | **0.9645** | **0.947** (25 Sep, 16:48) |
 | v2 (commit 241b5af) | v1 + fine-tuned embedding blocking + embedding cosine + detail features, 500k training entities | **stage 1: 0.9803** (OOF 0.9800); stage 2 crashed on a cross-encoder dtype bug, fixed in 71533e9; no test output | — |
 | **v3** (run 20260925-161528-v3, code a63476f) | v2 + collective features + stage 2 with cross-encoder ce-small-v2 + coherence + two-threshold decision | **0.9906** (stage 1 0.9817) | **0.984** (25 Sep, 20:01) |
-| v4 (run *-v4) | v3 + orphan simulation (18.6% of train S1 removed) | 0.9900 (on the harder orphan-simulated holdout) | pending (~22:00) |
-| v5 (ready, `runs/v5_overnight.sh`) | v3 + France self-trained cross-encoder + 3-cross-encoder ensemble with pool-side competition + name-cluster features + k_emb 20 + 700k training entities (+ orphan simulation if v4 >= v3 publicly) | — | — |
+| v4 (run 20260925-183824-v4) | v3 + orphan simulation (18.6% of train S1 removed) | 0.99001 (on the harder orphan-simulated holdout) | **0.984** (25 Sep, 21:48): no change over v3 |
+| v5 (running since 26 Sep 00:27, `runs/v5_overnight.sh 0.186`) | v4 + France-adapted e5-small cross-encoder + France-adapted **bge-reranker-v2-m3** (568M, Apache-2.0) scored where the small one is unsure (`ce_band`) + pool-side cross-encoder context + name-cluster features + k_emb 20 + 700k training entities; each adapted cross-encoder is gated on held-out US/India log-loss | ETA ~07:00-08:00 | — |
 
-Leaderboard at 20:10 on 2026-09-25: 1st 0.98696, 2nd 0.98642, 3rd 0.98588, 4th 0.985. The target is ~0.99.
+Leaderboard at 00:00 on 2026-09-26: 1st 0.988419, 2nd 0.987818, 3rd 0.987288, 4th 0.987. Our best is 0.984 (v3, v4).
 
 **Holdout → public.** Test errors run at about 1.5-1.7x holdout errors (v1: 3.55% → 5.3%; v3: 0.94% → 1.6%). The gap is proportional, so holdout gains transfer. Public 0.987 needs a holdout of ~0.9923; 0.990 needs ~0.9941.
 
