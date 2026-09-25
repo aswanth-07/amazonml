@@ -138,11 +138,12 @@ def subset(h: np.ndarray, lengths: np.ndarray, idx: np.ndarray):
     return h[at], n
 
 
-def neighbours(query, index_n, index_a, t_first, t_country, cap: int, step: int = 20_000):
+def neighbours(query, index_n, index_a, t_first, t_country, cap: int, step: int = 5_000):
     """For query records (name hashes, lengths, address hashes, lengths, first numbers,
     countries), every same-country target sharing one of their 3 rarest name or address
     tokens, with a score: 2 x name hits + address hits + 1.5 if the house numbers agree.
-    Yields (query index, target position, score) per chunk of queries."""
+    Yields (query index, target position, score) per chunk of queries; chunks of 5k
+    queries keep the postings of 3 tokens with df <= cap under ~50M per chunk."""
     qn, qnl, qa, qal, q_first, q_country = query
     hn, on = rarest(qn, qnl, index_n, cap, 3)
     ha, oa = rarest(qa, qal, index_a, cap, 3)
@@ -285,7 +286,7 @@ def main() -> int:
     )
     ap.add_argument("--valid", type=int, default=20_000, help="validation keys")
     ap.add_argument("--unowned", type=float, default=0.35, help="pool side: share nobody owns")
-    ap.add_argument("--df-cap", type=int, default=3000)
+    ap.add_argument("--df-cap", type=int, default=2000)
     ap.add_argument("--max-neg", type=int, default=7)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()

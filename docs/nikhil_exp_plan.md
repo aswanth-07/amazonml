@@ -74,7 +74,10 @@ export DATA=student_resource/dataset PY=python   # Windows: PY="py -3.13" as the
    --set scale.stage1_model=runs/<v5 run>/scale_model.joblib
    --set scale.ce_model=<v5's two cross-encoders>,models/lw-small,models/lwp-small
    --set scale.save_stage2=true --set scale.drop_s1_share=0.186
+   --set scale.ce_train_all=true --set scale.ce_pool_context=true
    ```
+   `ce_train_all` matters for C7: its groups are a pool record's suitors, which in test
+   include every entity; without it, train would score only eligible entities' pairs.
    then `python scripts/stage2_search.py --run runs/<that run> --only <v5 families>` and
    `--only <v5 families>,lw,lw_grp,lwp,lwp_grp,lw_pool,lwp_pool` (or `--mode greedy`).
    Report the **holdout macro F0.5 with and without** the listwise columns (same holdout

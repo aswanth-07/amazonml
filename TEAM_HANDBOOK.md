@@ -4,7 +4,7 @@ Read this first, whether you are a teammate or an agent working for one. It says
 what the task is, what has been built, what it scores, how to run it, what was
 learned, and which open directions are free for a branch to take.
 
-Last updated 2026-09-26 02:00 IST.
+Last updated 2026-09-26 01:10 IST.
 
 ---
 
@@ -47,7 +47,7 @@ Rules as always: models MIT or Apache-2.0 and at most 8B parameters, no external
 report holdout macro F0.5, and do not upload to the portal without telling the lead. If
 you need v5's `train_scores.npz`, the blocking caches or the embeddings, ask the lead.
 
-**Status (26 Sep, ~02:00 IST, Nikhil):** step 1 done. Branch **`nikhil_exp`** is rebased onto
+**Status (26 Sep, ~01:00 IST, Nikhil):** step 1 done. Branch **`nikhil_exp`** is rebased onto
 `cb483ba` (main's behaviour kept wherever the two overlapped) and pushed; 212 tests and
 ruff are clean. It also holds C7 (the stretch), French région/département normalisation,
 and training groups built from the raw data on the encoder share, so the holdout stays
@@ -63,7 +63,8 @@ Full steps and commands: [docs/nikhil_exp_plan.md](docs/nikhil_exp_plan.md), sec
 3. Train and gate C1: `LW_INIT=models/ce-small-v2 bash scripts/gpu_runbook.sh lw`, then `lweval`.
 4. Train and gate C7: `LW_INIT=models/ce-small-v2 bash scripts/gpu_runbook.sh lwp`, then `lwpeval`.
 5. With the lead (v5's caches): v5 + `scale.ce_model=<v5 CEs>,models/lw-small,models/lwp-small`
-   + `scale.stage1_model=<v5 run>` + `scale.save_stage2=true` + `scale.drop_s1_share=0.186`;
+   + `scale.stage1_model=<v5 run>` + `scale.save_stage2=true` + `scale.drop_s1_share=0.186`
+   + `scale.ce_train_all=true` (C7 needs every suitor scored in train, as in test);
    `scripts/stage2_search.py` with and without the `lw*`/`lwp*` families.
 6. Report the holdout macro F0.5 with and without each model in section 2. The French
    normalisation is a public-LB A/B only (delete `artifacts/cache/test_*` first); upload

@@ -144,7 +144,7 @@ runB)
   MODELS=${MODELS:-$CE_MODEL,$LW_MODEL,$LWP_MODEL}
   $PY -m ber.cli run "${COMMON[@]}" --out-dir output-B --tag B \
       --set "scale.stage1_model=$RUN_A/scale_model.joblib" --set "scale.ce_model=$MODELS" \
-      --set scale.save_stage2=true
+      --set scale.save_stage2=true --set scale.ce_train_all=true --set scale.ce_pool_context=true
   RUN_B=$(latest_run B)
   $PY - "$RUN_A" "$RUN_B" <<'EOF'
 import json, sys
@@ -166,7 +166,7 @@ final)
   MODELS=${MODELS:-$CE_MODEL,$LW_MODEL,$LWP_MODEL}
   $PY -m ber.cli run "${COMMON[@]}" --out-dir output-final --tag final \
       --set "scale.stage1_model=$RUN_A/scale_model.joblib" --set "scale.ce_model=$MODELS" \
-      --set "scale.stage2_exclude=${EXCLUDE:-}" --set "scale.stage2_monotone=${MONO:-false}"
+      --set "scale.stage2_exclude=${EXCLUDE:-}" --set "scale.stage2_monotone=${MONO:-false}"       --set scale.ce_train_all=true --set scale.ce_pool_context=true
   $PY -m ber.cli validate --matching output-final/matching_results.tsv \
       --candidates output-final/candidate_pairs.tsv --test-dir "$DATA/test"
   echo "submit output-final/matching_results.tsv only if its holdout beats the best so far"
