@@ -153,6 +153,41 @@ CITY_FORMS: dict[str, str] = {
     "simla": "shimla", "belgaum": "belagavi", "hubli": "hubballi", "gauhati": "guwahati",
 }  # fmt: skip
 
+# French régions and their départements. Test Source 1 writes the région ("Nouvelle-
+# Aquitaine"); about a third of the pool writes the département in its place ("Gironde",
+# "Nord"), a token mismatch no US or Indian pair has (their state names and codes are
+# mapped). A component that is exactly one of these names becomes its région's token.
+FR_REGIONS: dict[str, tuple[str, ...]] = {
+    "Auvergne-Rhône-Alpes": ("Ain", "Allier", "Ardèche", "Cantal", "Drôme", "Isère", "Loire",
+                             "Haute-Loire", "Puy-de-Dôme", "Rhône", "Savoie", "Haute-Savoie"),
+    "Bourgogne-Franche-Comté": ("Côte-d'Or", "Doubs", "Jura", "Nièvre", "Haute-Saône",
+                                "Saône-et-Loire", "Yonne", "Territoire de Belfort"),
+    "Bretagne": ("Côtes-d'Armor", "Finistère", "Ille-et-Vilaine", "Morbihan"),
+    "Centre-Val de Loire": ("Cher", "Eure-et-Loir", "Indre", "Indre-et-Loire", "Loir-et-Cher",
+                            "Loiret"),
+    "Corse": ("Corse-du-Sud", "Haute-Corse"),
+    "Grand Est": ("Ardennes", "Aube", "Marne", "Haute-Marne", "Meurthe-et-Moselle", "Meuse",
+                  "Moselle", "Bas-Rhin", "Haut-Rhin", "Vosges"),
+    "Hauts-de-France": ("Aisne", "Nord", "Oise", "Pas-de-Calais", "Somme"),
+    "Île-de-France": ("Paris", "Seine-et-Marne", "Yvelines", "Essonne", "Hauts-de-Seine",
+                      "Seine-Saint-Denis", "Val-de-Marne", "Val-d'Oise"),
+    "Normandie": ("Calvados", "Eure", "Manche", "Orne", "Seine-Maritime"),
+    "Nouvelle-Aquitaine": ("Charente", "Charente-Maritime", "Corrèze", "Creuse", "Dordogne",
+                           "Gironde", "Landes", "Lot-et-Garonne", "Pyrénées-Atlantiques",
+                           "Deux-Sèvres", "Vienne", "Haute-Vienne"),
+    "Occitanie": ("Ariège", "Aude", "Aveyron", "Gard", "Haute-Garonne", "Gers", "Hérault", "Lot",
+                  "Lozère", "Hautes-Pyrénées", "Pyrénées-Orientales", "Tarn", "Tarn-et-Garonne"),
+    "Pays de la Loire": ("Loire-Atlantique", "Maine-et-Loire", "Mayenne", "Sarthe", "Vendée"),
+    "Provence-Alpes-Côte d'Azur": ("Alpes-de-Haute-Provence", "Hautes-Alpes", "Alpes-Maritimes",
+                                   "Bouches-du-Rhône", "Var", "Vaucluse"),
+}  # fmt: skip
+_FR_SEGMENTS: dict[str, str] = {
+    clean(name): clean(region).replace(" ", "")
+    for region, departements in FR_REGIONS.items()
+    for name in (region, *departements)
+}
+_NUMBER_SUFFIX = re.compile(r"\b(\d+)(bis|ter|quater)\b")  # "5bis" -> "5 bis", as "5 bis" reads
+
 LANDMARK_WORDS = frozenset({"near", "opp", "behind", "derriere"})
 # "null"/"<NULL>" placeholders, unit markers whose number is what matters, and
 # "City"/"Township" suffixes that come and go on the same place name.
@@ -201,6 +236,9 @@ def normalize_address(raw: str, transliterate: bool = True, country: str = "") -
     # No label: the historical default (US states). A known label: its own map.
     # Any other label (France, or a country never seen): street forms only.
     token_map, country_phrases = _MAPS.get(country, _DEFAULT_MAP if not country else _BASE_ONLY)
+    # French régions/départements only where no country map applies (France, or a label
+    # never seen), so US and Indian addresses normalise exactly as before
+    regions = _FR_SEGMENTS if country and country not in _MAPS else None
     postal = sorted(set(extract_postal_codes(raw)))
     postal_set = set(postal)
 
@@ -208,7 +246,10 @@ def normalize_address(raw: str, transliterate: bool = True, country: str = "") -
     core_tokens: list[str] = []
     landmark_tokens: list[str] = []
     for segment in _SEGMENT_SPLIT.split(_PIN_SPACED.sub(r"\1\2", raw)):
-        text = replace_phrases(clean(segment, transliterate), _PHRASES)
+        text = clean(segment, transliterate)
+        if regions is not None:
+            text = regions.get(text) or _NUMBER_SUFFIX.sub(r"\1 \2", text)
+        text = replace_phrases(text, _PHRASES)
         text = replace_phrases(text, country_phrases)
         tokens = canonical_tokens(text.split(), token_map, DROP)
         tokens = [t if t in postal_set else _strip_zeros(t) for t in tokens]

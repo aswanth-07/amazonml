@@ -108,3 +108,29 @@ def test_normalize_records_adds_all_columns():
         assert col in out
     assert out.loc[0, "name_core"] == "cafe de gare"
     assert out.loc[0, "postal"] == "69002"
+
+
+def test_french_departement_reads_as_its_region():
+    """Test Source 1 writes the région, a third of the pool the département."""
+    from ber.normalize.address import normalize_address
+
+    s1 = normalize_address(
+        "Nouvelle-Aquitaine, La Teste-de-Buch, 5 bis Rue Pierre Dignac", True, "france"
+    )
+    pool = normalize_address("5BIS R PIERRE DIGNAC, Gironde, LA TESTE-DE-BUCH", True, "france")
+    assert sorted(s1.clean.split()) == sorted(pool.clean.split())
+    nord = normalize_address("50 Rue Gutenberg, Lille, Nord", True, "france")
+    assert "hautsdefrance" in nord.clean.split() and "nord" not in nord.clean.split()
+    # only a whole component is a département: street names keep their words
+    street = normalize_address("2 Rue de la Loire, Nantes, Loire-Atlantique", True, "france")
+    assert "loire" in street.clean.split() and "paysdelaloire" in street.clean.split()
+
+
+def test_us_and_india_addresses_normalise_as_before():
+    from ber.normalize.address import normalize_address
+
+    for raw, country in (("12 Paris Rd, Paris, TX", "united states"), ("5bis Nord St, Nord, Loire", "united states"),
+                         ("12 MG Road, Pune, Maharashtra", "india")):  # fmt: skip
+        out = normalize_address(raw, True, country).clean.split()
+        assert not {"iledefrance", "hautsdefrance", "auvergnerhonealpes"} & set(out)
+        assert "5bis" in out or "5bis" not in raw.lower()
