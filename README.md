@@ -171,5 +171,4 @@ pytest -q                       # everything
 pytest -q -m "not slow"         # skip the end-to-end runs
 ```
 
-CI runs lint and tests on Ubuntu and Windows
-([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+There is no CI: run lint and tests locally before pushing.
