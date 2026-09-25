@@ -285,28 +285,40 @@ def test_scale_run_with_embedding_view(synthetic_dir, tmp_path: Path):
     from ber.scale import run
 
     _fake_embeddings(synthetic_dir, tmp_path / "emb")
-    cfg = load_config(
-        None,
-        [
-            f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
-            f"scale.emb_dir={(tmp_path / 'emb').as_posix()}",
-            f"runs_dir={(tmp_path / 'runs').as_posix()}",
-            f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
-            "scale.train_sample=150",
-            "scale.n_jobs=1",
-            "scale.n_threads=2",
-            "model.n_folds=3",
-            "model.num_boost_round=200",
-            "model.early_stopping_rounds=20",
-        ],
-    )
-    summary = run(cfg, synthetic_dir, tmp_path / "out")
+
+    def cfg_for(cache: str, emb: bool):
+        return load_config(
+            None,
+            [
+                f"scale.cache_dir={(tmp_path / cache).as_posix()}",
+                f"scale.emb_dir={(tmp_path / 'emb').as_posix() if emb else ''}",
+                f"runs_dir={(tmp_path / 'runs' / cache).as_posix()}",
+                f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
+                "scale.train_sample=150",
+                "scale.n_jobs=1",
+                "scale.n_threads=2",
+                "model.n_folds=3",
+                "model.num_boost_round=200",
+                "model.early_stopping_rounds=20",
+            ],
+        )
+
+    summary = run(cfg_for("fresh", emb=True), synthetic_dir, tmp_path / "out")
+    # the same run on top of a token-only run's caches copies shared pairs' features
+    run(cfg_for("warm", emb=False), synthetic_dir, tmp_path / "out_plain", predict_test=False)
+    run(cfg_for("warm", emb=True), synthetic_dir, tmp_path / "out_warm")
+    for name in ("matching_results.tsv", "candidate_pairs.tsv"):
+        a = (tmp_path / "out" / name).read_bytes()
+        assert a == (tmp_path / "out_warm" / name).read_bytes()
     assert summary["test"]["validation_ok"], summary["test"]["errors"]
     assert summary["test"]["scored"]["fbeta"] > 0.8
     tb = summary["train_blocking"]
     assert "cos_emb_recall@1" in tb
     s1_ids = pd.read_csv(synthetic_dir / "train" / "train_source1.tsv", sep="\t")["entity_id"]
     assert tb["eligible_entities"] == int((~encoder_mask(s1_ids.to_numpy())).sum())
-    run_dir = next((tmp_path / "runs").iterdir())
+    run_dir = next((tmp_path / "runs" / "fresh").iterdir())
     names = pd.read_csv(run_dir / "feature_importance.tsv", sep="\t")["feature"].tolist()
     assert {"cos_emb", "cos_emb_rank_s1", "cos_emb_margin_pool"} <= set(names)
+    scores = np.load(run_dir / "train_scores.npz")
+    assert len(scores["p"]) == len(scores["rows"]) == len(scores["labels"])
+    assert (run_dir / "test_scores.npz").exists()

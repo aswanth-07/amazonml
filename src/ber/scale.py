@@ -142,6 +142,9 @@ class SplitData:
     num_d: sp.csr_matrix
     stats: dict[str, float] = field(default_factory=dict)
     key: str = ""  # identifies the candidate set for the caches; empty: do not cache
+    # the token-view candidate set this one extends (key, rows, cols): its cached features
+    # are reused for every pair the two sets share
+    donor: tuple[str, np.ndarray, np.ndarray] | None = None
 
 
 def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -> SplitData:
@@ -164,9 +167,11 @@ def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -
                     {"rows": rows, "cols": cols, "base": base, "num_q": mq, "num_d": md}, tmp
                 )
                 tmp.replace(path)
+    donor = None
     if cfg.scale.emb_dir:
         from ber.embed import embedding_key
 
+        donor = (key, rows, cols) if key else None
         rows, cols, base = _with_embeddings(s1, pool, cfg, name, rows, cols, base, views)
         sc = cfg.scale
         key = _sha(f"{key}|{sc.k_emb}|{sc.k_emb_reverse}|{embedding_key(sc.emb_dir, name)}") if key else ""  # fmt: skip
@@ -180,7 +185,7 @@ def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -
         "reduction_ratio": float(1 - len(rows) / max(len(s1) * len(pool), 1)),
     }
     log.info("%s: %s", name, stats)
-    return SplitData(name, s1, pool, rows, cols, base, mq, md, stats, key)
+    return SplitData(name, s1, pool, rows, cols, base, mq, md, stats, key, donor)
 
 
 def _block(views: Views, s1: Table, pool: Table, cfg: Config, name: str):
@@ -367,11 +372,64 @@ def _unique_pairs(rows: np.ndarray, cols: np.ndarray, n_cols: int) -> tuple[np.n
 
 
 def pair_features(sd: SplitData, idx: np.ndarray) -> pd.DataFrame:
-    rows, cols = sd.rows[idx], sd.cols[idx]
     cols_out: dict[str, np.ndarray] = {k: v[idx] for k, v in sd.base.items()}
-    cols_out.update(string_features(sd.s1, sd.pool, rows, cols))
-    cols_out.update(number_features(sd.num_q, sd.num_d, rows, cols))
+    cols_out.update(intrinsic_features(sd, idx))
     return pd.DataFrame(cols_out)
+
+
+def intrinsic_features(sd: SplitData, idx: np.ndarray) -> dict[str, np.ndarray]:
+    """Features that depend only on the two records of a pair, not on the candidate set."""
+    rows, cols = sd.rows[idx], sd.cols[idx]
+    out = string_features(sd.s1, sd.pool, rows, cols)
+    out.update(number_features(sd.num_q, sd.num_d, rows, cols))
+    return out
+
+
+def _feature_path(cfg: Config, split: str, key: str) -> Path:
+    return Path(cfg.scale.cache_dir) / f"{split}_features_{key}_v{FEATURE_VERSION}.npy"
+
+
+def _load_features(path: Path):
+    names_path = path.with_suffix(".json")
+    if path.exists() and names_path.exists():
+        return np.load(path, mmap_mode="r"), json.loads(names_path.read_text())
+    return None
+
+
+def _donor_source(sd: SplitData, cfg: Config):
+    """(donor feature matrix, intrinsic column names and their donor positions, donor row per
+    pair or -1) when the candidate set this one extends has cached features; else None."""
+    if sd.donor is None:
+        return None
+    key, d_rows, d_cols = sd.donor
+    loaded = _load_features(_feature_path(cfg, sd.name, key))
+    if loaded is None or len(d_rows) == 0:
+        return None
+    feats, names = loaded
+    n_d = len(sd.pool)
+    kd = d_rows.astype(np.int64) * n_d + d_cols
+    order = np.argsort(kd, kind="stable")
+    ks = kd[order]
+    kn = sd.rows.astype(np.int64) * n_d + sd.cols
+    at = np.minimum(np.searchsorted(ks, kn), len(ks) - 1)
+    pos = np.where(ks[at] == kn, order[at], -1)
+    intrinsic = [c for c in names if c not in sd.base]
+    log.info("%s: reusing features of %d/%d pairs", sd.name, int((pos >= 0).sum()), len(pos))
+    return feats, intrinsic, [names.index(c) for c in intrinsic], pos
+
+
+def _features_with_donor(sd: SplitData, idx: np.ndarray, donor) -> pd.DataFrame:
+    feats, intrinsic, src, pos = donor
+    p = pos[idx]
+    have = p >= 0
+    block = np.empty((len(idx), len(intrinsic)), np.float32)
+    if have.any():
+        block[have] = np.asarray(feats[p[have]])[:, src]
+    if (~have).any():
+        f = intrinsic_features(sd, idx[~have])
+        block[~have] = np.column_stack([np.asarray(f[c], np.float32) for c in intrinsic])
+    x = pd.DataFrame({k: v[idx] for k, v in sd.base.items()})
+    return pd.concat([x, pd.DataFrame(block, columns=intrinsic)], axis=1)
 
 
 def feature_matrix(sd: SplitData, cfg: Config) -> tuple[np.ndarray, list[str]]:
@@ -379,22 +437,20 @@ def feature_matrix(sd: SplitData, cfg: Config) -> tuple[np.ndarray, list[str]]:
 
     With a split key it is a memory-mapped ``.npy`` in the cache directory; its column
     names are written last, so a file from an interrupted run is never mistaken for
-    a finished one.
+    a finished one. When the candidate set extends a cached one (``sd.donor``), the
+    record-pair features of shared pairs are copied rather than recomputed.
     """
     n = len(sd.rows)
-    path = (
-        Path(cfg.scale.cache_dir) / f"{sd.name}_features_{sd.key}_v{FEATURE_VERSION}.npy"
-        if sd.key
-        else None
-    )
+    path = _feature_path(cfg, sd.name, sd.key) if sd.key else None
     names_path = path.with_suffix(".json") if path is not None else None
-    if path is not None and path.exists() and names_path.exists():
+    if path is not None and (cached := _load_features(path)) is not None:
         log.info("%s: cached features %s", sd.name, path.name)
-        return np.load(path, mmap_mode="r"), json.loads(names_path.read_text())
+        return cached
+    donor = _donor_source(sd, cfg)
     out, names = None, []
     for idx in _chunks(n, cfg.scale.feature_chunk):
         with timed(f"{sd.name}: features {idx[0]:,}-{idx[-1]:,} of {n:,}"):
-            x = pair_features(sd, idx)
+            x = pair_features(sd, idx) if donor is None else _features_with_donor(sd, idx, donor)
             if out is None:
                 names = list(x.columns)
                 shape = (n, len(names))
@@ -704,6 +760,11 @@ def run(
         _write_json(run_dir / "metrics.json", summary)
 
     _report_train(sd, final_p, thr, truth, cfg, run_dir, summary, eligible)
+    # every pair's final probability, for tuning decision rules offline
+    np.savez(
+        run_dir / "train_scores.npz", rows=sd.rows, cols=sd.cols, p=final_p, labels=labels,
+        n_true=n_true, eligible=eligible, in_sample=in_sample,
+    )  # fmt: skip
     model = TrainedModel(stage1, stage2, feature_names, s2_names, thr, cfg.to_dict())
     Path(cfg.artifacts_dir).mkdir(parents=True, exist_ok=True)
     joblib.dump(model, Path(cfg.artifacts_dir) / "scale_model.joblib")
@@ -712,7 +773,7 @@ def run(
     del sd, s1, pool, p1, final_p
 
     if predict_test:
-        summary["test"] = predict_split(model, cfg, data_dir, out_dir)
+        summary["test"] = predict_split(model, cfg, data_dir, out_dir, save_to=run_dir)
     summary["minutes"] = round((time.time() - t0) / 60, 1)
     _write_json(run_dir / "metrics.json", summary)
     log.info("run recorded at %s (%.1f min)", run_dir, summary["minutes"])
@@ -817,7 +878,12 @@ def load_split_truth(data_dir: str | Path) -> dict[str, list[str]]:
 
 
 def predict_split(
-    model: TrainedModel, cfg: Config, data_dir: str | Path, out_dir: str | Path, split: str = "test"
+    model: TrainedModel,
+    cfg: Config,
+    data_dir: str | Path,
+    out_dir: str | Path,
+    split: str = "test",
+    save_to: Path | None = None,
 ) -> dict[str, Any]:
     s1, pool = load_tables(data_dir, split, cfg)
     sd = block_split(s1, pool, cfg, split, split_key(data_dir, split, cfg))
@@ -834,6 +900,9 @@ def predict_split(
             model.stage2, cols2, model.stage2_names, len(sd.rows), cfg.scale.feature_chunk
         )
         del cols2
+    if save_to is not None:
+        np.savez(Path(save_to) / f"{split}_scores.npz", rows=sd.rows, cols=sd.cols, p=probs,
+                 s1_ids=sd.s1.ids.astype("U"), pool_ids=sd.pool.ids.astype("U"))  # fmt: skip
     adj = adjusted(sd, probs, cfg)
     mask = (adj >= model.threshold) & (adj > 0)
     matches = id_lists(sd.rows[mask], sd.cols[mask], adj[mask], sd.s1.ids, sd.pool.ids)
