@@ -30,11 +30,22 @@ Full brief: [docs/problem_statement.md](docs/problem_statement.md).
 
 | Version | What it is | Holdout macro F0.5 (train) | Public LB |
 |---|---|---|---|
-| **v1 baseline** (tag `v1-baseline`, commit 4ddca44) | token blocking + LightGBM + stacked LightGBM | **0.9645** | pending, fill in |
-| v2 (commit 241b5af) | v1 + fine-tuned embedding blocking + embedding cosine + detail features, 500k training entities | **stage 1: 0.9803** (OOF 0.9800); stage 2 crashed on a cross-encoder dtype bug, fixed in 71533e9 | |
-| v3 (main, running since 16:15) | v2 + collective features + cross-encoder + coherence + tuned decision rules | pending (~17:30) | |
+| **v1 baseline** (tag `v1-baseline`, commit 4ddca44) | token blocking + LightGBM + stacked LightGBM | **0.9645** | **0.947** (25 Sep, 16:48) |
+| v2 (commit 241b5af) | v1 + fine-tuned embedding blocking + embedding cosine + detail features, 500k training entities | **stage 1: 0.9803** (OOF 0.9800); stage 2 crashed on a cross-encoder dtype bug, fixed in 71533e9; no test output | — |
+| v3 (main, running since 16:15) | v2 + collective features + cross-encoder + coherence + tuned decision rules | pending (~17:50); test files ~18:50 | |
 
 Leaderboard on 2026-09-25: 1st 0.9805, 2nd 0.9803, 3rd 0.9789. The target is ~0.99.
+
+**Public score is 1.75 points below the train holdout (0.947 vs 0.9645). Leading
+explanation: test has more decoys.** Test has 5.53-5.82 pool records per S1 business
+(France 5.53, India 5.82, US 5.76) against 4.68 in train, in every country. With ~3.46
+true copies per business, about 40% of the test pool matches nothing, against 26% in
+train. One likely generator detail: businesses dropped from test Source 1 whose copies
+stay in the pool (orphans, the hardest decoys). France is not singled out: its predicted
+singleton rate (5.4%) and matches per business (3.46) match train. **Anyone tuning a
+threshold or decision rule on train must account for this.** The lead is testing it by
+dropping ~19% of train businesses from the candidate set (keeping their copies) to
+reproduce the test ratio.
 
 **How the holdout is measured.** Training entities are split. The matcher trains on a
 random sample with 4-fold cross-validation grouped by entity; every other entity is a
