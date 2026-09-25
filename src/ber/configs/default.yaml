@@ -105,6 +105,9 @@ scale:                       # the large-scale path used by `ber run` / `ber cv`
   emb_dir: ""                # embeddings + kNN lists from `python -m ber.embed all`; "" disables
   k_emb: 10                  # candidates added per S1 from its embedding kNN list
   k_emb_reverse: 1           # ... plus each pool record's best S1 suitors by embedding
+  ce_model: ""               # cross-encoder from `python -m ber.crossenc train`; "" disables
+  ce_python: py -3.13        # interpreter with torch + transformers that runs it
+  ce_min_p1: 0.02            # cross-encoder scores pairs with stage-1 probability >= this
 
 decision:
   strategy: threshold        # threshold | expected_f

@@ -44,6 +44,8 @@ EXCEPTIONS = {
     # fine-tuning and running the local encoder (weights on disk, no network)
     ("embed.py", "torch"),
     ("embed.py", "transformers"),
+    ("crossenc.py", "torch"),
+    ("crossenc.py", "transformers"),
 }
 
 

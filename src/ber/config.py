@@ -157,6 +157,9 @@ class ScaleConfig:
     emb_dir: str = ""  # embeddings + kNN lists from ber.embed; empty: no embedding view
     k_emb: int = 10  # candidates added per Source 1 entity from its embedding kNN list
     k_emb_reverse: int = 1  # ... plus each pool record's best Source 1 suitors by embedding
+    ce_model: str = ""  # cross-encoder from ber.crossenc; "" disables the stage-2 ce feature
+    ce_python: str = "py -3.13"  # interpreter with torch + transformers that runs it
+    ce_min_p1: float = 0.02  # pairs scored by the cross-encoder: stage-1 probability >= this
 
 
 @dataclass

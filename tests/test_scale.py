@@ -322,3 +322,46 @@ def test_scale_run_with_embedding_view(synthetic_dir, tmp_path: Path):
     scores = np.load(run_dir / "train_scores.npz")
     assert len(scores["p"]) == len(scores["rows"]) == len(scores["labels"])
     assert (run_dir / "test_scores.npz").exists()
+
+
+@pytest.mark.slow
+def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
+    import sys
+
+    from ber.scale import run
+
+    fake = (Path(__file__).parent / "fake_crossenc.py").as_posix()
+    cfg = load_config(
+        None,
+        [
+            f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
+            f"runs_dir={(tmp_path / 'runs').as_posix()}",
+            f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
+            "scale.ce_model=unused",
+            f'scale.ce_python=\'"{Path(sys.executable).as_posix()}" "{fake}"\'',
+            "scale.ce_min_p1=0.001",
+            "scale.train_sample=250",
+            "scale.n_jobs=1",
+            "scale.n_threads=2",
+            "model.n_folds=3",
+            "model.num_boost_round=200",
+            "model.early_stopping_rounds=20",
+        ],
+    )
+    summary = run(cfg, synthetic_dir, tmp_path / "out")
+    assert summary["test"]["validation_ok"], summary["test"]["errors"]
+    assert summary["cross_encoder_pairs"] > 0
+    run_dir = next((tmp_path / "runs").iterdir())
+    names = pd.read_csv(run_dir / "feature_importance_stage2.tsv", sep="\t")["feature"].tolist()
+    assert {"ce", "ce_rank_s1", "ce_gap_s1", "ce_margin_s1"} <= set(names)
+
+
+def test_ce_columns_rank_only_scored_pairs():
+    from ber.scale import ce_columns
+
+    rows = np.array([0, 0, 0, 1])
+    ce = np.array([0.2, np.nan, 0.9, 0.5], np.float32)
+    f = ce_columns(rows, ce)
+    assert f["ce_rank_s1"][[0, 2, 3]].tolist() == [1, 0, 0]
+    assert np.isnan(f["ce_rank_s1"][1]) and np.isnan(f["ce_gap_s1"][1])
+    assert f["ce_margin_s1"][2] == pytest.approx(0.7)

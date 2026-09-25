@@ -287,8 +287,15 @@ def finetune(
             h = model(**enc).last_hidden_state
         return _pool(h, enc["attention_mask"])
 
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    def save() -> None:
+        model.save_pretrained(out)
+        tok.save_pretrained(out)
+
     t0 = time.time()
-    step = 0
+    step = skipped = 0
     while step < n_steps:
         for bi in rng.permutation(len(batches)):
             if step >= n_steps:
@@ -298,25 +305,35 @@ def finetune(
             hn = hard[qa]
             hn = hn[hn >= 0]
             cols = np.concatenate([pb, hn])
-            q = embed([s1_text[i] for i in qa])
-            d = embed([pool_text[i] for i in cols])
-            # column j belongs to entity owner[cols[j]]; mask same-entity columns except the target
-            ent_q = torch.as_tensor(qa, device=dev)
-            ent_d = torch.as_tensor(owner[cols], device=dev)
-            n = len(idx)
-            target = torch.arange(n, device=dev)
-            logits = scale * q @ d.T
-            same = ent_q[:, None] == ent_d[None, :]
-            same[target, target] = False
-            logits = logits.masked_fill(same, -1e4)
-            loss_q = torch.nn.functional.cross_entropy(logits, target)
-            logits_d = scale * d[:n] @ q.T
-            same_d = ent_d[:n, None] == ent_q[None, :]
-            same_d[target, target] = False
-            loss_d = torch.nn.functional.cross_entropy(logits_d.masked_fill(same_d, -1e4), target)
-            loss = (loss_q + loss_d) / 2
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
+            try:
+                q = embed([s1_text[i] for i in qa])
+                d = embed([pool_text[i] for i in cols])
+                # column j belongs to entity owner[cols[j]]; mask same-entity columns but the target
+                ent_q = torch.as_tensor(qa, device=dev)
+                ent_d = torch.as_tensor(owner[cols], device=dev)
+                n = len(idx)
+                target = torch.arange(n, device=dev)
+                logits = scale * q @ d.T
+                same = ent_q[:, None] == ent_d[None, :]
+                same[target, target] = False
+                logits = logits.masked_fill(same, -1e4)
+                loss_q = torch.nn.functional.cross_entropy(logits, target)
+                logits_d = scale * d[:n] @ q.T
+                same_d = ent_d[:n, None] == ent_q[None, :]
+                same_d[target, target] = False
+                loss_d = torch.nn.functional.cross_entropy(
+                    logits_d.masked_fill(same_d, -1e4), target
+                )
+                loss = (loss_q + loss_d) / 2
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+            except torch.OutOfMemoryError:  # a batch of unusually long texts: skip it
+                opt.zero_grad(set_to_none=True)
+                q = d = logits = logits_d = loss = None
+                torch.cuda.empty_cache()
+                skipped += 1
+                log.warning("out of GPU memory on a batch; skipped (%d so far)", skipped)
+                continue
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             sched.step()
@@ -324,10 +341,9 @@ def finetune(
             if step % 50 == 0 or step == 1:
                 log.info("step %d/%d loss %.4f (%.1f steps/s)", step, n_steps, loss.item(),
                          step / (time.time() - t0))  # fmt: skip
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(out)
-    tok.save_pretrained(out)
+            if step % 250 == 0:
+                save()  # a crash later still leaves a usable encoder
+    save()
     (out / "finetune.json").write_text(
         json.dumps(
             {
@@ -339,6 +355,7 @@ def finetune(
                 "scale": scale,
                 "encoder_share": ENCODER_SHARE,
                 "hard_negatives": bool((hard >= 0).any()),
+                "skipped_batches": skipped,
                 "seconds": round(time.time() - t0),
             },
             indent=2,
@@ -350,7 +367,7 @@ def finetune(
 
 # ----------------------------------------------------------------------------- kNN
 def knn(q: np.ndarray, d: np.ndarray, q_country: np.ndarray, d_country: np.ndarray, k: int,
-        q_chunk: int = 1024, d_block: int = 1_000_000):  # fmt: skip
+        q_chunk: int = 1024, d_block: int = 500_000):  # fmt: skip
     """Exact top-k inner product per query within its country (records with an empty
     country are searchable from every country). Returns (rows, cols, sims)."""
     import torch

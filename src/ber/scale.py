@@ -554,6 +554,55 @@ def stage2_columns(
     return f
 
 
+def cross_scores(
+    sd: SplitData,
+    cfg: Config,
+    p1: np.ndarray,
+    data_dir: str | Path,
+    work_dir: Path,
+    only: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Cross-encoder probability for every pair with stage-1 p1 >= ``ce_min_p1`` (NaN for the
+    rest), run in the torch interpreter. ``only``: boolean mask of S1 positions to score."""
+    import os
+    import shlex
+    import subprocess
+
+    sc = cfg.scale
+    if not sc.ce_model:
+        return None
+    sel = p1 >= sc.ce_min_p1
+    if only is not None:
+        sel &= only[sd.rows]
+    sel = np.flatnonzero(sel)
+    pairs, out = work_dir / f"{sd.name}_ce_pairs.npz", work_dir / f"{sd.name}_ce_scores.npy"
+    np.savez(pairs, rows=sd.rows[sel], cols=sd.cols[sel])
+    src = Path(__file__).resolve().parents[1]
+    cmd = [*shlex.split(sc.ce_python), "-m", "ber.crossenc", "score", "--model", sc.ce_model,
+           "--data-dir", str(data_dir), "--split", sd.name, "--pairs", str(pairs), "--out", str(out)]  # fmt: skip
+    env = {**os.environ, "PYTHONPATH": str(src)}
+    with timed(f"{sd.name}: cross-encoder on {len(sel):,} pairs"):
+        subprocess.run(cmd, check=True, env=env)
+    ce = np.full(len(sd.rows), np.nan, dtype=np.float32)
+    ce[sel] = np.load(out).astype(np.float32)
+    return ce
+
+
+def ce_columns(rows: np.ndarray, ce: np.ndarray) -> dict[str, np.ndarray]:
+    """The cross-encoder probability and how it ranks among the entity's scored candidates."""
+    v = np.nan_to_num(ce, nan=-1.0)
+    rank, best, second, _ = group_stats(rows, v)
+    scored = ~np.isnan(ce)
+    return {
+        "ce": ce,
+        "ce_rank_s1": np.where(scored, rank, np.nan).astype(np.float32),
+        "ce_gap_s1": np.where(scored, v - best, np.nan).astype(np.float32),
+        "ce_margin_s1": np.where(scored, np.where(rank == 0, v - second, v - best), np.nan).astype(
+            np.float32
+        ),
+    }
+
+
 def _frame(columns: dict[str, np.ndarray], idx: np.ndarray, names: list[str]) -> pd.DataFrame:
     return pd.DataFrame({n: columns[n][idx] for n in names})
 
@@ -752,6 +801,13 @@ def run(
     _write_json(run_dir / "metrics.json", summary)
     final_p, stage2, s2_names, thr = p1, [], [], summary["stage1"]["threshold"]
 
+    # ---- cross-encoder on uncertain pairs of entities it was not trained on
+    ce = cross_scores(sd, cfg, p1, data_dir, run_dir, only=eligible)
+    if ce is not None:
+        keep.update(ce_columns(sd.rows, ce))
+        summary["cross_encoder_pairs"] = int((~np.isnan(ce)).sum())
+        del ce
+
     # ---- stage 2: stage-1 probabilities in context
     if cfg.scale.stage2:
         cols2 = stage2_columns(sd.rows, sd.cols, p1, keep)
@@ -919,6 +975,10 @@ def predict_split(
     if model.stage2:
         cand_score = sd.base["score"]
         sd.base = {"score": cand_score}
+        if "ce" in model.stage2_names:
+            keep.update(
+                ce_columns(sd.rows, cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir)))
+            )
         cols2 = stage2_columns(sd.rows, sd.cols, p1, keep)
         del keep
         probs = predict_columns(
