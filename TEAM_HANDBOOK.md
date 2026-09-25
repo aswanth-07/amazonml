@@ -32,9 +32,12 @@ Full brief: [docs/problem_statement.md](docs/problem_statement.md).
 |---|---|---|---|
 | **v1 baseline** (tag `v1-baseline`, commit 4ddca44) | token blocking + LightGBM + stacked LightGBM | **0.9645** | **0.947** (25 Sep, 16:48) |
 | v2 (commit 241b5af) | v1 + fine-tuned embedding blocking + embedding cosine + detail features, 500k training entities | **stage 1: 0.9803** (OOF 0.9800); stage 2 crashed on a cross-encoder dtype bug, fixed in 71533e9; no test output | — |
-| v3 (main, running since 16:15) | v2 + collective features + cross-encoder + coherence + tuned decision rules | pending (~17:50); test files ~18:50 | |
+| **v3** (run 20260925-161528-v3, code a63476f) | v2 + collective features + stage 2 with cross-encoder ce-small-v2 + coherence + two-threshold decision | **0.9906** (stage 1 0.9817) | **0.984** (25 Sep, 20:01) |
+| v4 (running) | v3 + orphan simulation (18.6% of train S1 removed) | pending (~21:00) | |
 
-Leaderboard on 2026-09-25: 1st 0.9805, 2nd 0.9803, 3rd 0.9789. The target is ~0.99.
+Leaderboard at 20:10 on 2026-09-25: 1st 0.98696, 2nd 0.98642, 3rd 0.98588, 4th 0.985. The target is ~0.99.
+
+**Holdout → public.** Test errors run at about 1.5-1.7x holdout errors (v1: 3.55% → 5.3%; v3: 0.94% → 1.6%). The gap is proportional, so holdout gains transfer. Public 0.987 needs a holdout of ~0.9923; 0.990 needs ~0.9941.
 
 **Public score is 1.75 points below the train holdout (0.947 vs 0.9645). Leading
 explanation: test has more decoys.** Test has 5.53-5.82 pool records per S1 business
