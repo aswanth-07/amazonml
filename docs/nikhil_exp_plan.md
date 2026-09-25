@@ -1,7 +1,7 @@
 # Branch `nikhil_exp`: plan, code and hand-off (for v6)
 
 Built on `main` at `cb483ba` (26 Sep, 00:36 IST). Everything here is additive: with the new
-settings at their defaults, `ber run` behaves exactly as on `main`. Tests: 212 pass
+settings at their defaults, `ber run` behaves exactly as on `main`. Tests: 213 pass
 (`pytest -q`), `ruff check` and `ruff format --check` are clean. **Nothing here has run on
 the real data yet**: the numbers that decide v6 come from the runs in section 3.
 
@@ -22,6 +22,7 @@ branch had its own version of any of them, main's was kept.
 | **Raw-data training groups** (`scripts/make_lw_groups.py`) | C1/C7 training groups straight from the TSVs on the **encoder share**, no pipeline run or cache needed | trains anywhere; the matcher's holdout is untouched, so with/without is directly comparable to v5 |
 | **French région/département** (`normalize/address.py`) | a component that is exactly a French région or département name becomes the région's token; `5BIS` → `5 bis` | measured on test: French S1 writes only régions (Hauts-de-France 102k, Nouvelle-Aquitaine 85k, Pays de la Loire 73k); ~1/3 of the French pool writes the département instead (Nord 151k, Gironde 150k, …). US/India had their state names mapped; France had nothing, so a third of French pairs carried an address mismatch no train pair has. France is "most of the public gap" (handbook 3c) |
 | Stage-2 combination search (`scripts/stage2_search.py`) + `scale.save_stage2` / `stage2_exclude` / `stage2_monotone` | retrain stage 2 offline on every family subset, exact holdout F0.5 | pick what ships from measurements, not guesses |
+| **Source fingerprints** (`scale.fingerprint`, off by default) | stage-2 columns `fp_shared`, `fp_missing`, `fp_n_sib`, `fp_inv`: does a candidate share the invented address tokens (house-number variants, typos absent from the S1 address) of the entity's confident copies from its own source, or lack a variant all of them share? | measured tonight: copies inside a source share a per-source address variant (`HN 883` on all 4 S2 copies; `6513` on both S3 copies where S1 says 6515; `Tuullahoma`), while the neighbour decoy has the neighbour's number and the plain spelling. Separates typo'd true copies from neighbours; the search keeps it only if the holdout says so |
 | Score cache (`artifacts/cache/scores/`) | a scorer's output is reused when the model and pairs are the same | reruns do not rescore ~10M pairs |
 | Shift diagnostics (`scripts/shift_diagnostics.py`) | orphans vs extra decoys vs country, from kNN lists | explains test behaviour per country |
 
@@ -30,7 +31,7 @@ Data facts found tonight (train, measured):
   tokens: `HN 883` on all 4 S2 copies, `6513` (S1 says 6515) on both S3 copies, `Glendle`,
   `Tuullahoma`. A neighbour decoy nearby has the neighbour number and the *correct*
   spelling. But sharing an exact address inside a source is only 73% pure (buildings), so
-  this is a feature idea (section 5), not a rule.
+  this is a feature (`scale.fingerprint`), not a rule.
 - Address-less records are 4.4% of true copies and 0.29% of decoys.
 - No row-order or id leak (ids random, rows not grouped).
 
@@ -74,12 +75,13 @@ export DATA=student_resource/dataset PY=python   # Windows: PY="py -3.13" as the
    --set scale.stage1_model=runs/<v5 run>/scale_model.joblib
    --set scale.ce_model=<v5's two cross-encoders>,models/lw-small,models/lwp-small
    --set scale.save_stage2=true --set scale.drop_s1_share=0.186
-   --set scale.ce_train_all=true --set scale.ce_pool_context=true
+   --set scale.ce_train_all=true --set scale.ce_pool_context=true --set scale.fingerprint=true
    ```
    `ce_train_all` matters for C7: its groups are a pool record's suitors, which in test
    include every entity; without it, train would score only eligible entities' pairs.
    then `python scripts/stage2_search.py --run runs/<that run> --only <v5 families>` and
-   `--only <v5 families>,lw,lw_grp,lwp,lwp_grp,lw_pool,lwp_pool` (or `--mode greedy`).
+   `--only <v5 families>,lw,lw_grp,lwp,lwp_grp,lw_pool,lwp_pool,fp` (or `--mode greedy`,
+   which also measures `fp`, the source fingerprints, on its own).
    Report the **holdout macro F0.5 with and without** the listwise columns (same holdout
    as v5: the listwise models trained on the encoder share, `lw_share` stays 0).
 6. **France A/B** (public LB only, no French labels): delete `artifacts/cache/test_*`,
@@ -103,10 +105,6 @@ Report in the handbook's section 2: holdout with/without C1, with/without C7, th
 
 ## 5. Next ideas (not built; for whoever has time)
 
-- **Source-fingerprint features**: for pair (S1 A, pool p), whether p shares its rare
-  address tokens (house-number variants, typos absent from A's own address) with A's
-  confident copies *from the same source*, and whether p lacks a variant all of them share.
-  Separates a typo'd true copy from a neighbour decoy.
 - **B2**: train stage 2 on a mix of drop shares (0, 0.1, 0.186, 0.25) for robustness.
 - **F9**: a GNN over the S1-pool candidate graph (joint exclusivity).
 - **H1**: an Apache-2.0 7B LLM judge (Qwen2.5-7B-Instruct + LoRA) on uncertain entities only.

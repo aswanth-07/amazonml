@@ -181,6 +181,7 @@ class ScaleConfig:
     stage2_exclude: str = ""  # stage-2 column families left out, comma-separated (stage2_family)
     save_stage2: bool = False  # write stage-2 inputs for scripts/stage2_search.py
     stage2_monotone: bool = False  # stage 2 may only rise with p1 and every model probability
+    fingerprint: bool = False  # stage-2 source-fingerprint columns (scale.fingerprint_columns)
 
 
 @dataclass

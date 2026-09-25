@@ -852,6 +852,8 @@ def stage2_family(name: str) -> str:
         return "p1"
     if name in ("coh_emb", "partner_p1"):
         return "coh"
+    if name.startswith("fp_"):
+        return "fp"
     m = _SCORER.match(name)
     if m:
         prefix, rest = m.group(1), m.group(2) or ""
@@ -901,6 +903,57 @@ def coherence_columns(
     partner_p1 = np.full(n, np.nan, dtype=np.float32)
     partner_p1[has] = p1[partner[has]]
     return {"coh_emb": coh, "partner_p1": partner_p1}
+
+
+def fingerprint_columns(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    p1: np.ndarray,
+    s1_addr: np.ndarray,
+    pool_addr: np.ndarray,
+    pool_source: np.ndarray,
+    lo: float = 0.02,
+    hi: float = 0.9,
+) -> dict[str, np.ndarray]:
+    """Source fingerprints: does a candidate carry its source's variant of the address?
+
+    The generator renders one address per (business, source) and derives that source's
+    copies from it, invented tokens included: ``HN 883`` on all four S2 copies of one
+    business, ``6513`` on both S3 copies where Source 1 says 6515, ``Tuullahoma``. A
+    neighbour decoy next door has the neighbour's number and the plain spelling.
+
+    For pair (entity A, pool record p) with p1 >= ``lo``: its *invented* tokens are those of
+    p's address not in A's; its *siblings* are A's other candidates from p's source with
+    p1 >= ``hi``. Columns (NaN where p has no sibling):
+    - ``fp_shared``: most invented tokens p shares with one sibling;
+    - ``fp_missing``: invented tokens every sibling has and p lacks;
+    - ``fp_n_sib``: number of siblings (0 is a value, not NaN);
+    - ``fp_inv``: p's own invented tokens.
+    """
+    n = len(rows)
+    out = {k: np.full(n, np.nan, np.float32) for k in ("fp_shared", "fp_missing", "fp_inv")}
+    out["fp_n_sib"] = np.full(n, np.nan, np.float32)
+    idx = np.flatnonzero(p1 >= lo)
+    if not len(idx):
+        return out
+    idx = idx[np.lexsort((-p1[idx], rows[idx]))]
+    r = rows[idx]
+    starts = np.flatnonzero(np.r_[True, r[1:] != r[:-1]])
+    ends = np.r_[starts[1:], len(r)]
+    for s, e in zip(starts.tolist(), ends.tolist()):
+        group = idx[s:e]
+        base = set(s1_addr[rows[group[0]]].split())
+        inv = {int(i): set(pool_addr[cols[i]].split()) - base for i in group}
+        confident = [int(i) for i in group if p1[i] >= hi]
+        for i in group.tolist():
+            src = pool_source[cols[i]]
+            sibs = [inv[j] for j in confident if j != i and pool_source[cols[j]] == src]
+            out["fp_inv"][i] = len(inv[i])
+            out["fp_n_sib"][i] = len(sibs)
+            if sibs:
+                out["fp_shared"][i] = max(len(inv[i] & t) for t in sibs)
+                out["fp_missing"][i] = len(set.intersection(*sibs) - inv[i])
+    return out
 
 
 def _pool_embeddings(sd: SplitData, cfg: Config) -> np.ndarray:
@@ -1146,6 +1199,10 @@ def run(
     if cfg.scale.emb_dir:
         with timed("train: coherence"):
             keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))
+    if cfg.scale.fingerprint:
+        with timed("train: source fingerprints"):
+            keep.update(fingerprint_columns(sd.rows, sd.cols, p1, sd.s1.addr, sd.pool.addr,
+                                            sd.pool.source))  # fmt: skip
 
     # ---- stage 2: stage-1 probabilities in context
     if cfg.scale.stage2:
@@ -1443,6 +1500,9 @@ def predict_split(
             del scored
         if "coh_emb" in model.stage2_names:
             keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))
+        if "fp_shared" in model.stage2_names:
+            keep.update(fingerprint_columns(sd.rows, sd.cols, p1, sd.s1.addr, sd.pool.addr,
+                                            sd.pool.source))  # fmt: skip
         cols2 = stage2_columns(sd.rows, sd.cols, p1, keep)
         del keep
         probs = predict_columns(

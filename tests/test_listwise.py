@@ -187,7 +187,7 @@ def test_scale_run_with_listwise_scorer_and_stage2_search(synthetic_dir, tmp_pat
         f"scale.ce_model=unused_pairwise,{lw_model.as_posix()}",
         f'scale.ce_python=\'"{Path(sys.executable).as_posix()}" "{fake}"\'',
         "scale.ce_min_p1=0.001", "scale.lw_share=0.3", "scale.save_stage2=true",
-        "scale.ce_pool_context=true",
+        "scale.ce_pool_context=true", "scale.fingerprint=true",
         "scale.train_sample=250", "scale.n_jobs=1", "scale.n_threads=2",
         "model.n_folds=3", "model.num_boost_round=200", "model.early_stopping_rounds=20",
     ]  # fmt: skip
@@ -202,6 +202,7 @@ def test_scale_run_with_listwise_scorer_and_stage2_search(synthetic_dir, tmp_pat
     assert not (scores["eligible"] & g["train"]).any()  # the share is out of every report
     names = pd.read_csv(run_dir / "feature_importance_stage2.tsv", sep="\t")["feature"].tolist()
     assert {"ce", "ce_rank_pool", "lw", "lw_rest_s1", "lw_grp", "lw_rank_pool"} <= set(names)
+    assert {"fp_shared", "fp_missing", "fp_n_sib", "fp_inv"} <= set(names)
     assert (run_dir / "train_lw_scores.npy").exists()
     assert (run_dir / "train_lw_scores_grp.npy").exists()
 
@@ -443,3 +444,23 @@ def test_pool_side_scorer_gets_its_own_prefix(synthetic_dir, tmp_path):
     out = cross_scores(sd, cfg, rng.random(200), synthetic_dir, tmp_path)
     assert set(out) == {"ce", "lwp", "lwp_grp"}
     assert stage2_family("lwp_rank_pool") == "lwp_pool" and stage2_family("lwp") == "lwp"
+
+
+def test_fingerprint_tells_the_sources_variant_from_a_neighbour():
+    """S1 says 6515; the business's S3 copies carry their source's variant 6513; a
+    neighbour decoy says 6541 and misses the variant."""
+    from ber.scale import fingerprint_columns
+
+    s1_addr = np.array(["6515 pilotbird ln houston tx"])
+    pool_addr = np.array(["6513 pilotbird ln houston tx", "6513 pilotbird ln houston tx",
+                          "6541 pilotbird ln houston tx", "6515 pilotbird ln houston tx"])  # fmt: skip
+    pool_source = np.array([3, 3, 3, 2])
+    rows = np.zeros(4, dtype=np.int64)
+    cols = np.arange(4)
+    p1 = np.array([0.95, 0.6, 0.5, 0.97], np.float32)
+    f = fingerprint_columns(rows, cols, p1, s1_addr, pool_addr, pool_source)
+    assert f["fp_shared"][1] == 1 and f["fp_missing"][1] == 0  # the typo'd sibling
+    assert f["fp_shared"][2] == 0 and f["fp_missing"][2] == 1  # the neighbour
+    assert f["fp_n_sib"].tolist() == [0, 1, 1, 0]  # S2 has no confident S2 sibling
+    assert np.isnan(f["fp_shared"][[0, 3]]).all() and f["fp_inv"][3] == 0
+    assert stage2_family("fp_shared") == "fp"

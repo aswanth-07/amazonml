@@ -121,6 +121,7 @@ scale:                       # the large-scale path used by `ber run` / `ber cv`
   stage2_exclude: ""         # comma-separated stage-2 column families left out (see scale.stage2_family)
   save_stage2: false         # write stage-2 inputs for scripts/stage2_search.py
   stage2_monotone: false     # stage 2 may only rise with p1 and every cross-encoder / listwise probability
+  fingerprint: false         # stage-2 columns: does a candidate carry its source's variant of the address (fp_*)
 
 decision:
   strategy: threshold        # threshold | expected_f
