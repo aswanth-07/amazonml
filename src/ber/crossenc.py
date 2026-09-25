@@ -92,10 +92,17 @@ def train(
     seed: int = 42,
     knn: str | Path | None = None,
     n_neg_knn: int = 3,
+    pseudo: str | Path | None = None,
+    pseudo_split: str = "test",
 ) -> Path:
     """``knn``: the embedding kNN lists of train (``ber.embed``); each entity's best
     ``n_neg_knn`` wrong neighbours join the token-blocking negatives, so the cross-encoder
-    also learns the confusions the embedding view brings into the candidate set."""
+    also learns the confusions the embedding view brings into the candidate set.
+
+    ``pseudo``: pseudo-labelled pairs of another split (rows, cols, labels, as written by
+    scripts/make_pseudo_labels.py) mixed into training, for self-training on a country the
+    training data lacks. ``init`` may be an already trained cross-encoder, whose head is
+    kept, so the model adapts rather than starts over."""
     import joblib
     import torch
     from transformers import AutoTokenizer
@@ -134,12 +141,25 @@ def train(
     y = np.concatenate([np.ones(len(pos_r), np.float32), np.zeros(len(neg_r), np.float32)])
     pick = rng.permutation(len(rows))[:max_pairs]
     rows, cols, y = rows[pick], cols[pick], y[pick]
+    texts = [(_text(s1), _text(pool))]
+    src = np.zeros(len(y), dtype=np.int8)
+    if pseudo:
+        with np.load(pseudo) as z:
+            pr, pc, py = z["rows"].astype(np.int64), z["cols"].astype(np.int64), z["labels"]
+        s1b, poolb = load_frames(data_dir, pseudo_split)
+        texts.append((_text(s1b), _text(poolb)))
+        rows, cols = np.concatenate([rows, pr]), np.concatenate([cols, pc])
+        y = np.concatenate([y, py.astype(np.float32)])
+        src = np.concatenate([src, np.ones(len(py), dtype=np.int8)])
+        mix = rng.permutation(len(y))
+        rows, cols, y, src = rows[mix], cols[mix], y[mix], src[mix]
+        log.info("with %d pseudo-labelled %s pairs", len(py), pseudo_split)
     log.info("cross-encoder pairs: %d (%.1f%% positive)", len(y), 100 * y.mean())
 
-    ta, tb = _text(s1), _text(pool)
     dev = torch.device("cuda")
     tok = AutoTokenizer.from_pretrained(init)
-    model = _model(init).to(dev).train()
+    head = Path(init) / "head.pt"
+    model = _model(init, head if head.exists() else None).to(dev).train()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     n_steps = len(y) // batch
     warm = max(1, n_steps // 20)
@@ -150,8 +170,10 @@ def train(
     t0 = time.time()
     for step in range(n_steps):
         sl = slice(step * batch, (step + 1) * batch)
-        x = tok([ta[i] for i in rows[sl]], [tb[i] for i in cols[sl]], padding=True,
-                truncation="longest_first", max_length=MAX_LEN, return_tensors="pt").to(dev)  # fmt: skip
+        left = [texts[s][0][i] for i, s in zip(rows[sl], src[sl])]
+        right = [texts[s][1][i] for i, s in zip(cols[sl], src[sl])]
+        x = tok(left, right, padding=True, truncation="longest_first", max_length=MAX_LEN,
+                return_tensors="pt").to(dev)  # fmt: skip
         with torch.autocast("cuda", dtype=torch.bfloat16):
             logits = model(**x)
         loss = lossf(logits.float(), torch.as_tensor(y[sl], device=dev))
@@ -172,6 +194,7 @@ def train(
         json.dumps(
             {
                 "init": str(init),
+                "pseudo": str(pseudo) if pseudo else None,
                 "pairs": len(y),
                 "positive_share": float(y.mean()),
                 "n_neg": n_neg,
@@ -281,12 +304,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-neg-knn", type=int, default=3)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-5)
+    ap.add_argument("--pseudo", help="train: pseudo-labelled pairs of another split (npz)")
+    ap.add_argument("--pseudo-split", default="test")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")  # fmt: skip
     if args.command == "train":
         train(args.data_dir, args.init, args.blocking, args.model, args.n_neg, args.max_pairs,
-              batch=args.batch, lr=args.lr, knn=args.knn, n_neg_knn=args.n_neg_knn)  # fmt: skip
+              batch=args.batch, lr=args.lr, knn=args.knn, n_neg_knn=args.n_neg_knn,
+              pseudo=args.pseudo, pseudo_split=args.pseudo_split)  # fmt: skip
     elif args.command == "eval":  # --pairs npz with rows, cols, labels; --model a,b,...
         with np.load(args.pairs) as z:
             rows, cols, y = z["rows"], z["cols"], z["labels"].astype(bool)
