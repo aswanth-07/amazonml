@@ -38,7 +38,13 @@ STDLIB_NETWORK = {
 }  # fmt: skip
 # Sanctioned exceptions: loading and fetching licence-checked encoder weights
 # for the optional, offline embedding blocker.
-EXCEPTIONS = {("pretrained.py", "huggingface_hub"), ("blockers.py", "sentence_transformers")}
+EXCEPTIONS = {
+    ("pretrained.py", "huggingface_hub"),
+    ("blockers.py", "sentence_transformers"),
+    # fine-tuning and running the local encoder (weights on disk, no network)
+    ("embed.py", "torch"),
+    ("embed.py", "transformers"),
+}
 
 
 def _imports(path: Path) -> set[str]:

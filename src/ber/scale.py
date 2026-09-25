@@ -66,9 +66,18 @@ from ber.vectorize import (
 log = logging.getLogger(__name__)
 
 STAGE2_KEEP = (
-    "score", "cos_name", "cos_addr", "name_tset", "name_best", "addr_tset", "key_tset",
-    "first_num_eq", "squash_partial", "num_jaccard",
-)  # fmt: skip
+    "score",
+    "cos_name",
+    "cos_addr",
+    "name_tset",
+    "name_best",
+    "addr_tset",
+    "key_tset",
+    "first_num_eq",
+    "squash_partial",
+    "num_jaccard",
+    "cos_emb",
+)  # fmt: skip  (those present in the feature matrix)
 
 
 BLOCKING_VERSION = 1  # bump when tokens, weighting or search change which pairs blocking returns
@@ -139,12 +148,14 @@ def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -
     """Candidate pairs, their cosines and group context. With a ``key``, the pairs, cosines
     and number matrices are cached, so a rerun skips hashing and search entirely."""
     path = Path(cfg.scale.cache_dir) / f"{name}_blocking_{key}.joblib" if key else None
+    views = None
     if path is not None and path.exists():
         with timed(f"{name}: load cached blocking {path.name}"):
             c = joblib.load(path)
         rows, cols, base, mq, md = c["rows"], c["cols"], c["base"], c["num_q"], c["num_d"]
     else:
-        rows, cols, base, mq, md = _block(s1, pool, cfg, name)
+        views, mq, md = _views(s1, pool, cfg, name)
+        rows, cols, base = _block(views, s1, pool, cfg, name)
         if path is not None:
             with timed(f"{name}: save blocking cache {path.name}"):
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +164,13 @@ def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -
                     {"rows": rows, "cols": cols, "base": base, "num_q": mq, "num_d": md}, tmp
                 )
                 tmp.replace(path)
+    if cfg.scale.emb_dir:
+        from ber.embed import embedding_key
+
+        rows, cols, base = _with_embeddings(s1, pool, cfg, name, rows, cols, base, views)
+        sc = cfg.scale
+        key = _sha(f"{key}|{sc.k_emb}|{sc.k_emb_reverse}|{embedding_key(sc.emb_dir, name)}") if key else ""  # fmt: skip
+    del views
     with timed(f"{name}: group context"):
         base.update(group_features(rows, cols, base))
     stats = {
@@ -165,8 +183,53 @@ def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -
     return SplitData(name, s1, pool, rows, cols, base, mq, md, stats, key)
 
 
-def _block(s1: Table, pool: Table, cfg: Config, name: str):
-    """Hash, weight, search: (rows, cols sorted by S1 then score, cosines, number matrices)."""
+def _block(views: Views, s1: Table, pool: Table, cfg: Config, name: str):
+    """Search: (rows, cols sorted by S1 then score, their cosines)."""
+    rows, cols = candidate_pairs(views, s1.country, pool.country, cfg, name)
+    with timed(f"{name}: cosines"):
+        base = views.cosines(rows, cols)
+    return _sorted(rows, cols, base)
+
+
+def _sorted(rows: np.ndarray, cols: np.ndarray, base: dict[str, np.ndarray]):
+    order = np.lexsort((-base["score"], rows))
+    rows, cols = rows[order].astype(np.int32), cols[order].astype(np.int32)
+    return rows, cols, {k: v[order] for k, v in base.items()}
+
+
+def _with_embeddings(s1, pool, cfg: Config, name: str, rows, cols, base, views):
+    """Add each entity's best pairs by embedding (and each pool record's best suitor),
+    re-score the new pairs on the token views, and give every pair its ``cos_emb``."""
+    from ber.embed import dense_row_dot, load_embeddings, load_knn
+
+    sc = cfg.scale
+    knn = load_knn(sc.emb_dir, name, s1.ids, pool.ids)
+    fr, fc = knn["fwd_rows"].astype(np.int64), knn["fwd_cols"].astype(np.int64)
+    rr, rc = knn["rev_rows"].astype(np.int64), knn["rev_cols"].astype(np.int64)
+    keep_f = group_stats(fr, knn["fwd_sim"].astype(np.float32))[0] < sc.k_emb
+    keep_r = group_stats(rc, knn["rev_sim"].astype(np.float32))[0] < sc.k_emb_reverse
+    n_d = len(pool)
+    cand = np.unique(np.concatenate([fr[keep_f] * n_d + fc[keep_f], rr[keep_r] * n_d + rc[keep_r]]))
+    new = np.setdiff1d(cand, rows.astype(np.int64) * n_d + cols, assume_unique=False)
+    log.info(
+        "%s: embedding view adds %d pairs (%.2f per S1)", name, len(new), len(new) / max(len(s1), 1)
+    )
+    if len(new):
+        if views is None:
+            views, _, _ = _views(s1, pool, cfg, name)
+        nr, nc = new // n_d, new % n_d
+        with timed(f"{name}: cosines of embedding pairs"):
+            cos = views.cosines(nr, nc)
+        base = {k: np.concatenate([base[k], cos[k]]) for k in base}
+        rows, cols, base = _sorted(np.concatenate([rows, nr]), np.concatenate([cols, nc]), base)
+    with timed(f"{name}: embedding cosines"):
+        e1, ep = load_embeddings(sc.emb_dir, name, s1.ids, pool.ids)
+        base["cos_emb"] = dense_row_dot(e1, ep, rows, cols)
+    return rows, cols, base
+
+
+def _views(s1: Table, pool: Table, cfg: Config, name: str):
+    """Hash and weight both sides: (views, S1 number matrix, pool number matrix)."""
     sc = cfg.scale
     with timed(f"{name}: hash tokens"):
         nq, nd = hash_docs(name_docs(s1), sc.n_jobs), hash_docs(name_docs(pool), sc.n_jobs)
@@ -184,13 +247,7 @@ def _block(s1: Table, pool: Table, cfg: Config, name: str):
     nq, nd = weight_and_normalize(nq, idf_n), weight_and_normalize(nd, idf_n)
     aq, ad = weight_and_normalize(aq, idf_a), weight_and_normalize(ad, idf_a)
     views = Views(nq, nd, aq, ad, pool_df[: nd.shape[1]], pool_df[nd.shape[1] :], cfg)
-    rows, cols = candidate_pairs(views, s1.country, pool.country, cfg, name)
-    with timed(f"{name}: cosines"):
-        base = views.cosines(rows, cols)
-    order = np.lexsort((-base["score"], rows))
-    rows, cols = rows[order].astype(np.int32), cols[order].astype(np.int32)
-    base = {k: v[order] for k, v in base.items()}
-    return rows, cols, base, mq, md
+    return views, mq, md
 
 
 @dataclass
@@ -505,13 +562,14 @@ def score_all(
     n = len(sd.rows)
     pos = [feats_names.index(c) for c in feature_names]
     p1 = np.empty(n, dtype=np.float32)
-    keep = {k: np.empty(n, dtype=np.float32) for k in STAGE2_KEEP}
+    kept = [k for k in STAGE2_KEEP if k in feats_names]
+    keep = {k: np.empty(n, dtype=np.float32) for k in kept}
     for idx in _chunks(n, cfg.scale.feature_chunk):
         s, e = idx[0], idx[-1] + 1
         with timed(f"{sd.name}: predict {s:,}-{e:,}"):
             block = np.asarray(feats[s:e])
             p1[s:e] = predict_avg(stage1, pd.DataFrame(block[:, pos], columns=feature_names))
-            for k in STAGE2_KEEP:
+            for k in kept:
                 keep[k][s:e] = block[:, feats_names.index(k)]
     if override is not None:
         p1[override["idx"]] = override["p1"]
@@ -583,16 +641,28 @@ def run(
     truth = load_split_truth(data_dir)
     sd = block_split(s1, pool, cfg, "train", split_key(data_dir, "train", cfg))
     labels, n_true = pair_labels(sd, truth)
-    summary["train_blocking"] = {**sd.stats, **blocking_recall(sd, labels, n_true, cfg.beta)}
+    # entities the matcher may learn from and be judged on: all, except those the embedding
+    # encoder was fine-tuned on (their embedding similarity is optimistic)
+    eligible = np.ones(len(s1), dtype=bool)
+    if cfg.scale.emb_dir:
+        from ber.embed import encoder_mask
+
+        eligible &= ~encoder_mask(s1.ids)
+    summary["train_blocking"] = {
+        **sd.stats,
+        "eligible_entities": int(eligible.sum()),
+        **blocking_recall(sd, labels, n_true, cfg.beta, eligible),
+    }
     log.info("train blocking: %s", summary["train_blocking"])
     _write_json(run_dir / "metrics.json", summary)
 
-    # ---- stage 1 on a sample of entities; every other entity is an untouched holdout
+    # ---- stage 1 on a sample of entities; every other eligible entity is an untouched holdout
     rng = np.random.default_rng(cfg.seed)
-    sample = np.sort(rng.choice(len(s1), min(cfg.scale.train_sample, len(s1)), replace=False))
+    pick = np.flatnonzero(eligible)
+    sample = np.sort(rng.choice(pick, min(cfg.scale.train_sample, len(pick)), replace=False))
     in_sample = np.zeros(len(s1), dtype=bool)
     in_sample[sample] = True
-    holdout = np.flatnonzero(~in_sample)
+    holdout = np.flatnonzero(eligible & ~in_sample)
     sidx = np.flatnonzero(in_sample[sd.rows])
     feats, feature_names = feature_matrix(sd, cfg)
     with timed("train: sample features"):
@@ -633,7 +703,7 @@ def run(
             stage2, s2_names = [], []
         _write_json(run_dir / "metrics.json", summary)
 
-    _report_train(sd, final_p, thr, truth, cfg, run_dir, summary)
+    _report_train(sd, final_p, thr, truth, cfg, run_dir, summary, eligible)
     model = TrainedModel(stage1, stage2, feature_names, s2_names, thr, cfg.to_dict())
     Path(cfg.artifacts_dir).mkdir(parents=True, exist_ok=True)
     joblib.dump(model, Path(cfg.artifacts_dir) / "scale_model.joblib")
@@ -660,27 +730,37 @@ def _stage_report(sd, probs, labels, n_true, sample, holdout, cfg, iters) -> dic
 
 
 def blocking_recall(
-    sd: SplitData, labels: np.ndarray, n_true: np.ndarray, beta: float
+    sd: SplitData,
+    labels: np.ndarray,
+    n_true: np.ndarray,
+    beta: float,
+    subset: np.ndarray | None = None,
 ) -> dict[str, float]:
+    """Recall of the candidate set and the F-beta a perfect matcher would reach on it,
+    over the S1 entities in the boolean ``subset`` (all when None)."""
+    if subset is None:
+        subset = np.ones(len(sd.s1), dtype=bool)
     tp = np.bincount(sd.rows, weights=labels.astype(float), minlength=len(sd.s1))
-    oracle_f = float(
-        fbeta_from_counts(tp, tp, n_true, beta).mean()
-    )  # perfect matcher on these candidates
+    oracle_f = float(fbeta_from_counts(tp, tp, n_true, beta)[subset].mean())
+    lab = labels & subset[sd.rows]
+    total = max(n_true[subset].sum(), 1)
     recall_at = {}
-    rank = sd.base["score_rank_s1"]
-    for k in (1, 3, 5, 10, 20):
-        recall_at[f"recall@{k}"] = float((labels & (rank < k)).sum() / max(n_true.sum(), 1))
-    return {
-        "pair_recall": float(labels.sum() / max(n_true.sum(), 1)),
-        "oracle_fbeta": oracle_f,
-        **recall_at,
-    }
+    for name in ("score", "cos_emb"):
+        if f"{name}_rank_s1" not in sd.base:
+            continue
+        rank = sd.base[f"{name}_rank_s1"]
+        for k in (1, 3, 5, 10, 20):
+            recall_at[f"{name}_recall@{k}"] = float((lab & (rank < k)).sum() / total)
+    return {"pair_recall": float(lab.sum() / total), "oracle_fbeta": oracle_f, **recall_at}
 
 
-def _report_train(sd, probs, thr, truth, cfg, run_dir: Path, summary: dict) -> None:
+def _report_train(sd, probs, thr, truth, cfg, run_dir: Path, summary: dict, eligible) -> None:
     adj = adjusted(sd, probs, cfg)
     mask = (adj >= thr) & (adj > 0)
     pred = id_lists(sd.rows[mask], sd.cols[mask], adj[mask], sd.s1.ids, sd.pool.ids)
+    keep_ids = set(sd.s1.ids[eligible].tolist())
+    truth = {k: v for k, v in truth.items() if k in keep_ids}
+    pred = {k: v for k, v in pred.items() if k in keep_ids}
     countries = dict(zip(sd.s1.ids, sd.s1.country))
     summary["train_full"] = {
         "fbeta": macro_fbeta(pred, truth, cfg.beta),

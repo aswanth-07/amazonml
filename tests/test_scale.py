@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.sparse as sp
 
@@ -236,3 +237,76 @@ def test_scale_run_on_synthetic(synthetic_dir, tmp_path: Path):
     for name in ("matching_results.tsv", "candidate_pairs.tsv"):
         a = (tmp_path / "out" / name).read_bytes()
         assert a == (tmp_path / "out2" / name).read_bytes()
+
+
+def _fake_embeddings(data_dir: Path, emb_dir: Path, k: int = 10, dim: int = 64) -> None:
+    """Embeddings and kNN files in ber.embed's format, from hashed name trigrams (no torch)."""
+    import zlib
+
+    from ber.embed import countries, emb_paths, load_frames
+
+    def vec(texts):
+        out = np.zeros((len(texts), dim), np.float32)
+        for i, t in enumerate(texts):
+            t = f"  {t.lower()}  "
+            for j in range(len(t) - 2):
+                out[i, zlib.crc32(t[j : j + 3].encode()) % dim] += 1
+        out /= np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-9)
+        return out.astype(np.float16)
+
+    emb_dir.mkdir(parents=True, exist_ok=True)
+    for split in ("train", "test"):
+        p = emb_paths(emb_dir, split)
+        s1, pool = load_frames(data_dir, split)
+        q, d = vec(s1["business_name"].tolist()), vec(pool["business_name"].tolist())
+        np.save(p["s1"], q)
+        np.save(p["pool"], d)
+        np.save(p["s1_ids"], s1["entity_id"].to_numpy().astype("U"))
+        np.save(p["pool_ids"], pool["entity_id"].to_numpy().astype("U"))
+        qc, dc = countries(s1), countries(pool)
+        sims = q.astype(np.float32) @ d.astype(np.float32).T
+        sims[qc[:, None] != dc[None, :]] = -2
+        fwd = np.argsort(-sims, axis=1, kind="stable")[:, :k]
+        rev = np.argmax(sims, axis=0)
+        np.savez(
+            p["knn"],
+            fwd_rows=np.repeat(np.arange(len(q)), k).astype(np.int32),
+            fwd_cols=fwd.ravel().astype(np.int32),
+            fwd_sim=np.take_along_axis(sims, fwd, 1).ravel().astype(np.float16),
+            rev_rows=rev.astype(np.int32),
+            rev_cols=np.arange(len(d)).astype(np.int32),
+            rev_sim=sims[rev, np.arange(len(d))].astype(np.float16),
+        )
+
+
+@pytest.mark.slow
+def test_scale_run_with_embedding_view(synthetic_dir, tmp_path: Path):
+    from ber.embed import encoder_mask
+    from ber.scale import run
+
+    _fake_embeddings(synthetic_dir, tmp_path / "emb")
+    cfg = load_config(
+        None,
+        [
+            f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
+            f"scale.emb_dir={(tmp_path / 'emb').as_posix()}",
+            f"runs_dir={(tmp_path / 'runs').as_posix()}",
+            f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
+            "scale.train_sample=150",
+            "scale.n_jobs=1",
+            "scale.n_threads=2",
+            "model.n_folds=3",
+            "model.num_boost_round=200",
+            "model.early_stopping_rounds=20",
+        ],
+    )
+    summary = run(cfg, synthetic_dir, tmp_path / "out")
+    assert summary["test"]["validation_ok"], summary["test"]["errors"]
+    assert summary["test"]["scored"]["fbeta"] > 0.8
+    tb = summary["train_blocking"]
+    assert "cos_emb_recall@1" in tb
+    s1_ids = pd.read_csv(synthetic_dir / "train" / "train_source1.tsv", sep="\t")["entity_id"]
+    assert tb["eligible_entities"] == int((~encoder_mask(s1_ids.to_numpy())).sum())
+    run_dir = next((tmp_path / "runs").iterdir())
+    names = pd.read_csv(run_dir / "feature_importance.tsv", sep="\t")["feature"].tolist()
+    assert {"cos_emb", "cos_emb_rank_s1", "cos_emb_margin_pool"} <= set(names)

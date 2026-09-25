@@ -19,7 +19,7 @@ from rapidfuzz.process import cpdist
 from ber.table import Table
 from ber.vectorize import row_dot, row_nnz
 
-GROUP_VALUES = ("score", "cos_name", "cos_addr")
+GROUP_VALUES = ("score", "cos_name", "cos_addr", "cos_emb")  # those present in the base
 
 
 def group_stats(
@@ -59,6 +59,8 @@ def group_features(
     out: dict[str, np.ndarray] = {}
     for side, keys in (("s1", rows), ("pool", cols)):
         for name in GROUP_VALUES:
+            if name not in base:
+                continue
             v = base[name]
             rank, best, second, size = group_stats(keys, v)
             out[f"{name}_rank_{side}"] = rank

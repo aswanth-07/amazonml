@@ -154,6 +154,9 @@ class ScaleConfig:
     feature_chunk: int = 2_000_000
     stage2: bool = True
     cache_dir: str = "artifacts/cache"
+    emb_dir: str = ""  # embeddings + kNN lists from ber.embed; empty: no embedding view
+    k_emb: int = 10  # candidates added per Source 1 entity from its embedding kNN list
+    k_emb_reverse: int = 1  # ... plus each pool record's best Source 1 suitors by embedding
 
 
 @dataclass
