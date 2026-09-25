@@ -1,7 +1,7 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
-**Team Name:** TODO(team)
-**Team Members:** TODO(team)
+**Team Name:** PerryDaPlatypus
+**Team Members:** A Aswanth Raj (team leader), V Nikhil, Nambi Rajan
 **Submission Date:** TODO(date)
 
 ---
