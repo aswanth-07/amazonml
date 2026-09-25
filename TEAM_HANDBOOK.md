@@ -33,7 +33,8 @@ Full brief: [docs/problem_statement.md](docs/problem_statement.md).
 | **v1 baseline** (tag `v1-baseline`, commit 4ddca44) | token blocking + LightGBM + stacked LightGBM | **0.9645** | **0.947** (25 Sep, 16:48) |
 | v2 (commit 241b5af) | v1 + fine-tuned embedding blocking + embedding cosine + detail features, 500k training entities | **stage 1: 0.9803** (OOF 0.9800); stage 2 crashed on a cross-encoder dtype bug, fixed in 71533e9; no test output | — |
 | **v3** (run 20260925-161528-v3, code a63476f) | v2 + collective features + stage 2 with cross-encoder ce-small-v2 + coherence + two-threshold decision | **0.9906** (stage 1 0.9817) | **0.984** (25 Sep, 20:01) |
-| v4 (running) | v3 + orphan simulation (18.6% of train S1 removed) | pending (~21:00) | |
+| v4 (run *-v4) | v3 + orphan simulation (18.6% of train S1 removed) | 0.9900 (on the harder orphan-simulated holdout) | pending (~22:00) |
+| v5 (ready, `runs/v5_overnight.sh`) | v3 + France self-trained cross-encoder + 3-cross-encoder ensemble with pool-side competition + name-cluster features + k_emb 20 + 700k training entities (+ orphan simulation if v4 >= v3 publicly) | — | — |
 
 Leaderboard at 20:10 on 2026-09-25: 1st 0.98696, 2nd 0.98642, 3rd 0.98588, 4th 0.985. The target is ~0.99.
 
@@ -135,6 +136,28 @@ Blocking is solved; **the matcher is the whole gap.**
    are heavy transliteration, addresses cut to a city or empty, and renames without an
    alias.
 7. **The weakest group is entities with exactly one true match** (F0.5 0.866 in v1).
+
+## 3c. Where v3 still loses (read before v5+ work)
+
+- **France is most of the public gap.** v3 is 4-5x less certain on France (unseen in
+  train) than on US/India: 0.77% of French businesses have an uncertain best candidate
+  against 0.16-0.18%, which implies ~4.3% French error against ~0.9% elsewhere. v5
+  answers this with self-training: `scripts/make_pseudo_labels.py` turns v3's confident
+  French test decisions into pseudo-labelled pairs (827k matches, 1.04M hard
+  non-matches), and `ber.crossenc train --pseudo` fine-tunes the e5-base cross-encoder on
+  them mixed with original pairs. Only the provided test inputs are used; no labels, no
+  external data.
+- **75% of v3's holdout errors are address-less candidates** (a same-name record with no
+  address). Where the name's other pool records all sit at the S1 address, P(match) is
+  0.97 (v5's name-cluster features). Where namesakes exist elsewhere, P(match) is 0.13
+  and the case is largely irreducible for everyone.
+- **44% of v3's missed true pairs lose their pool record to another suitor**, typically
+  a namesake. v5 gives stage 2 each cross-encoder's pool-side rank, gap and margin.
+- **Blocking still misses 0.64% of true pairs.** A third of them sit at embedding ranks
+  11-20; v5 raises k_emb to 20.
+- **Measured and dropped:** orphan decoys with fixed probabilities (no harm), EM prior
+  adjustment (+0.00001), abstaining on near-tied suitors (+0.00001), coherence features
+  (~0% of stage-2 gain).
 
 ## 4. Architecture
 
