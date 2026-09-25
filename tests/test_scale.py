@@ -313,6 +313,26 @@ def test_orphan_simulation_removes_businesses_and_reuses_features(synthetic_dir,
 
 
 @pytest.mark.slow
+def test_prior_adjustment_on_test(synthetic_dir, tmp_path: Path):
+    from ber.scale import run
+
+    cfg = load_config(
+        None,
+        [
+            f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
+            f"runs_dir={(tmp_path / 'runs').as_posix()}",
+            f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
+            "scale.train_sample=250", "scale.n_jobs=1", "scale.n_threads=2", "model.n_folds=3",
+            "model.num_boost_round=100", "model.early_stopping_rounds=20", "decision.prior_adjust=true",
+        ],
+    )  # fmt: skip
+    summary = run(cfg, synthetic_dir, tmp_path / "out")
+    prior = summary["test"]["prior_adjust"]
+    assert 0 < prior["train"] < 1 and 0 < prior["estimated"] < 1
+    assert summary["test"]["validation_ok"], summary["test"]["errors"]
+
+
+@pytest.mark.slow
 def test_reused_stage1_reproduces_the_run(synthetic_dir, tmp_path: Path):
     from ber.scale import run
 

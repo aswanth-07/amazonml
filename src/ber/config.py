@@ -123,6 +123,9 @@ class DecisionConfig:
     grid_max: float = 0.98
     grid_step: float = 0.01
     max_matches_per_s1: int | None = None
+    # rescale test probabilities to the EM-estimated test positive rate before deciding
+    # (Saerens et al. 2002): test has more decoys per Source 1 business than train
+    prior_adjust: bool = False
 
 
 @dataclass

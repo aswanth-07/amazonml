@@ -42,6 +42,26 @@ def test_scored_matches_direct_macro_f():
     assert got == pytest.approx(fbeta_from_counts(tp, pred, n_true, 0.5).mean())
 
 
+def test_em_prior_recovers_a_shifted_positive_rate():
+    from ber.tuning import em_prior, rescale_prior
+
+    rng = np.random.default_rng(1)
+
+    def calibrated(n, rate):  # posteriors of a calibrated model trained at rate 0.3
+        y = rng.random(n) < rate
+        score = np.where(y, rng.normal(1.5, 1, n), rng.normal(-1.5, 1, n))
+        # posterior under the training prior 0.3
+        lr = np.exp(3 * score)
+        return y, (0.3 * lr) / (0.3 * lr + 0.7)
+
+    _, p_train = calibrated(200_000, 0.3)
+    y_test, p_test = calibrated(200_000, 0.15)
+    prior = float(p_train.mean())
+    est = em_prior(p_test, prior)
+    assert est == pytest.approx(y_test.mean(), abs=0.01)
+    assert rescale_prior(p_test, prior, est).mean() == pytest.approx(y_test.mean(), abs=0.01)
+
+
 def test_tune_picks_the_best_strategy():
     rng = np.random.default_rng(0)
     rows = np.repeat(np.arange(400), 5)

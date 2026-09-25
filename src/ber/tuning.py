@@ -30,6 +30,27 @@ from ber.decision import macro_from_mask
 log = logging.getLogger(__name__)
 
 
+def em_prior(p: np.ndarray, prior: float, iters: int = 200, tol: float = 1e-7) -> float:
+    """The positive rate of a new population, from the posteriors ``p`` of a model trained
+    where it was ``prior`` (Saerens, Latinne and Decaestecker 2002, an EM procedure)."""
+    new = prior
+    p = p.astype(np.float64)
+    for _ in range(iters):
+        w1, w0 = new / prior, (1 - new) / (1 - prior)
+        nxt = float((w1 * p / (w1 * p + w0 * (1 - p))).mean())
+        if abs(nxt - new) < tol:
+            return nxt
+        new = nxt
+    return new
+
+
+def rescale_prior(p: np.ndarray, prior: float, new: float) -> np.ndarray:
+    """Posteriors re-weighted from the training positive rate to a new one (Bayes' rule)."""
+    w1, w0 = new / prior, (1 - new) / (1 - prior)
+    p = p.astype(np.float64)
+    return (w1 * p / (w1 * p + w0 * (1 - p))).astype(np.float32)
+
+
 @dataclass
 class Rule:
     strategy: str = "threshold"

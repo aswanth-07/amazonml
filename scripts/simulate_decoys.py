@@ -27,26 +27,8 @@ from pathlib import Path
 import numpy as np
 
 from ber.scale import exclusive_adjust
-from ber.tuning import Rule, Scored, tune
-
-
-def em_prior(p: np.ndarray, prior: float, iters: int = 100) -> float:
-    """Saerens et al. 2002: the positive rate of a new population from the posteriors of a
-    model trained where the rate was ``prior``."""
-    new = prior
-    for _ in range(iters):
-        w1, w0 = new / prior, (1 - new) / (1 - prior)
-        post = w1 * p / (w1 * p + w0 * (1 - p))
-        nxt = float(post.mean())
-        if abs(nxt - new) < 1e-7:
-            break
-        new = nxt
-    return new
-
-
-def rescale(p: np.ndarray, prior: float, new: float) -> np.ndarray:
-    w1, w0 = new / prior, (1 - new) / (1 - prior)
-    return (w1 * p / (w1 * p + w0 * (1 - p))).astype(np.float32)
+from ber.tuning import Rule, Scored, em_prior, tune
+from ber.tuning import rescale_prior as rescale
 
 
 def holdout_f(rows, cols, p, labels, n_true, holdout, rule) -> float:

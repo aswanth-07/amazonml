@@ -826,6 +826,7 @@ class TrainedModel:
     config: dict[str, Any]
     version: str = __version__
     decision: dict[str, Any] | None = None  # tuned rule (ber.tuning); None: plain threshold
+    train_prior: float | None = None  # mean final probability over eligible train pairs
 
     def rule(self):
         from ber.tuning import Rule
@@ -1034,6 +1035,7 @@ def run(
     model = TrainedModel(
         stage1, stage2, feature_names, s2_names, thr, cfg.to_dict(),
         decision={"strategy": rule.strategy, "params": rule.params},
+        train_prior=float(final_p[eligible[sd.rows]].mean()),
     )  # fmt: skip
     Path(cfg.artifacts_dir).mkdir(parents=True, exist_ok=True)
     joblib.dump(model, Path(cfg.artifacts_dir) / "scale_model.joblib")
@@ -1193,6 +1195,16 @@ def predict_split(
     if save_to is not None:
         np.savez(Path(save_to) / f"{split}_scores.npz", rows=sd.rows, cols=sd.cols, p=probs,
                  s1_ids=sd.s1.ids.astype("U"), pool_ids=sd.pool.ids.astype("U"))  # fmt: skip
+    prior = None
+    if cfg.decision.prior_adjust and model.train_prior:
+        from ber.tuning import em_prior, rescale_prior
+
+        new = em_prior(probs, model.train_prior)
+        log.info(
+            "%s: prior adjustment %.5f (train) -> %.5f (EM estimate)", split, model.train_prior, new
+        )
+        probs = rescale_prior(probs, model.train_prior, new)
+        prior = {"train": model.train_prior, "estimated": new}
     adj = adjusted(sd, probs, cfg)
     mask = decide(sd.rows, adj, model.rule(), cfg.beta)
     matches = id_lists(sd.rows[mask], sd.cols[mask], adj[mask], sd.s1.ids, sd.pool.ids)
@@ -1202,7 +1214,7 @@ def predict_split(
     report = validate_outputs(m_path, c_path, Path(data_dir) / split)
     print(report.render())
     out = {
-        "n_s1": len(s1), "n_pool": len(pool), **sd.stats,
+        "n_s1": len(s1), "n_pool": len(pool), **sd.stats, "prior_adjust": prior,
         "predicted_pairs": int(mask.sum()),
         "predicted_singletons": int(sum(1 for v in matches.values() if not v)),
         "validation_ok": report.ok, "errors": report.errors[:5], "warnings": report.warnings[:5],

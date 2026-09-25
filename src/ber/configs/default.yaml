@@ -122,3 +122,4 @@ decision:
   grid_max: 0.98
   grid_step: 0.01
   max_matches_per_s1: null
+  prior_adjust: false        # rescale test probabilities to the EM-estimated test positive rate (Saerens et al. 2002)
