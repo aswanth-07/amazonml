@@ -94,6 +94,8 @@ def train(
     n_neg_knn: int = 3,
     pseudo: str | Path | None = None,
     pseudo_split: str = "test",
+    micro_batch: int = 0,
+    freeze_embeddings: bool = False,
 ) -> Path:
     """``knn``: the embedding kNN lists of train (``ber.embed``); each entity's best
     ``n_neg_knn`` wrong neighbours join the token-blocking negatives, so the cross-encoder
@@ -102,7 +104,11 @@ def train(
     ``pseudo``: pseudo-labelled pairs of another split (rows, cols, labels, as written by
     scripts/make_pseudo_labels.py) mixed into training, for self-training on a country the
     training data lacks. ``init`` may be an already trained cross-encoder, whose head is
-    kept, so the model adapts rather than starts over."""
+    kept, so the model adapts rather than starts over.
+
+    ``micro_batch``: accumulate each ``batch`` from slices of this size, so a large backbone
+    (bge-reranker-v2-m3, 568M) trains with the same effective batch in 16 GB;
+    ``freeze_embeddings`` leaves the word embeddings (a 250k-token vocabulary) as they are."""
     import joblib
     import torch
     from transformers import AutoTokenizer
@@ -160,26 +166,36 @@ def train(
     tok = AutoTokenizer.from_pretrained(init)
     head = Path(init) / "head.pt"
     model = _model(init, head if head.exists() else None).to(dev).train()
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    if freeze_embeddings:  # a large vocabulary's embeddings: most of the optimiser memory
+        for name, p in model.named_parameters():
+            if "word_embeddings" in name:
+                p.requires_grad_(False)
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
     n_steps = len(y) // batch
     warm = max(1, n_steps // 20)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min((s + 1) / warm, max(0.0, (n_steps - s) / max(1, n_steps - warm)))
     )
-    lossf = torch.nn.BCEWithLogitsLoss()
+    lossf = torch.nn.BCEWithLogitsLoss(reduction="sum")
+    micro = min(micro_batch or batch, batch)  # gradient accumulation for large backbones
     t0 = time.time()
     for step in range(n_steps):
-        sl = slice(step * batch, (step + 1) * batch)
-        left = [texts[s][0][i] for i, s in zip(rows[sl], src[sl])]
-        right = [texts[s][1][i] for i, s in zip(cols[sl], src[sl])]
-        x = tok(left, right, padding=True, truncation="longest_first", max_length=MAX_LEN,
-                return_tensors="pt").to(dev)  # fmt: skip
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            logits = model(**x)
-        loss = lossf(logits.float(), torch.as_tensor(y[sl], device=dev))
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        loss_sum = 0.0
+        for m0 in range(step * batch, (step + 1) * batch, micro):
+            sl = slice(m0, min(m0 + micro, (step + 1) * batch))
+            left = [texts[s][0][i] for i, s in zip(rows[sl], src[sl])]
+            right = [texts[s][1][i] for i, s in zip(cols[sl], src[sl])]
+            x = tok(left, right, padding=True, truncation="longest_first", max_length=MAX_LEN,
+                    return_tensors="pt").to(dev)  # fmt: skip
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                logits = model(**x)
+            part = lossf(logits.float(), torch.as_tensor(y[sl], device=dev)) / batch
+            part.backward()
+            loss_sum += part.item()
+        loss = torch.tensor(loss_sum)
+        torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         sched.step()
         if (step + 1) % 200 == 0 or step == 0:
@@ -199,6 +215,8 @@ def train(
                 "positive_share": float(y.mean()),
                 "n_neg": n_neg,
                 "batch": batch,
+                "micro_batch": micro_batch,
+                "freeze_embeddings": freeze_embeddings,
                 "lr": lr,
                 "steps": n_steps,
                 "seconds": round(time.time() - t0),
@@ -306,13 +324,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lr", type=float, default=3e-5)
     ap.add_argument("--pseudo", help="train: pseudo-labelled pairs of another split (npz)")
     ap.add_argument("--pseudo-split", default="test")
+    ap.add_argument("--micro-batch", type=int, default=0, help="train: gradient-accumulation slice")
+    ap.add_argument("--freeze-embeddings", action="store_true", help="train: keep word embeddings")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")  # fmt: skip
     if args.command == "train":
         train(args.data_dir, args.init, args.blocking, args.model, args.n_neg, args.max_pairs,
               batch=args.batch, lr=args.lr, knn=args.knn, n_neg_knn=args.n_neg_knn,
-              pseudo=args.pseudo, pseudo_split=args.pseudo_split)  # fmt: skip
+              pseudo=args.pseudo, pseudo_split=args.pseudo_split, micro_batch=args.micro_batch,
+              freeze_embeddings=args.freeze_embeddings)  # fmt: skip
     elif args.command == "eval":  # --pairs npz with rows, cols, labels; --model a,b,...
         with np.load(args.pairs) as z:
             rows, cols, y = z["rows"], z["cols"], z["labels"].astype(bool)

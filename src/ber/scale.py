@@ -711,8 +711,17 @@ def cross_scores(
     src = Path(__file__).resolve().parents[1]
     env = {**os.environ, "PYTHONPATH": str(src)}
     out: dict[str, np.ndarray] = {}
+    band = [float(x) for x in sc.ce_band.split(",")] if sc.ce_band else None
     for i, model in enumerate(models):
         prefix = "ce" if i == 0 else f"ce{i + 1}"
+        todo, todo_pairs = sel, pairs
+        if i > 0 and band is not None:
+            # a slower model scores only the pairs the first one is unsure of; elsewhere its
+            # column repeats the first model's confident score (same rule in train and test)
+            first = out["ce"][sel]
+            todo = sel[(first > band[0]) & (first < band[1])]
+            todo_pairs = work_dir / f"{sd.name}_{prefix}_pairs.npz"
+            np.savez(todo_pairs, rows=sd.rows[todo], cols=sd.cols[todo])
         done = Path(model) / "crossenc.json"  # written last by ber.crossenc train
         waited = 0
         while not done.exists() and waited < sc.ce_wait:  # the model may still be training
@@ -722,11 +731,13 @@ def cross_scores(
             waited += 30
         scores = work_dir / f"{sd.name}_{prefix}_scores.npy"
         cmd = [*shlex.split(sc.ce_python), "-m", "ber.crossenc", "score", "--model", model,
-               "--data-dir", str(data_dir), "--split", sd.name, "--pairs", str(pairs), "--out", str(scores)]  # fmt: skip
-        with timed(f"{sd.name}: cross-encoder {model} on {len(sel):,} pairs"):
+               "--data-dir", str(data_dir), "--split", sd.name, "--pairs", str(todo_pairs), "--out", str(scores)]  # fmt: skip
+        with timed(f"{sd.name}: cross-encoder {model} on {len(todo):,} pairs"):
             subprocess.run(cmd, check=True, env=env)
         ce = np.full(len(sd.rows), np.nan, dtype=np.float32)
-        ce[sel] = np.load(scores).astype(np.float32)
+        if len(todo) < len(sel):
+            ce[sel] = out["ce"][sel]
+        ce[todo] = np.load(scores).astype(np.float32)
         out[prefix] = ce
     return out
 

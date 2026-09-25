@@ -111,6 +111,7 @@ scale:                       # the large-scale path used by `ber run` / `ber cv`
   ce_wait: 0                 # seconds to wait for a cross-encoder that is still training
   ce_pool_context: false     # cross-encoder rank/gap/margin among a pool record's suitors
   ce_train_all: false        # train: cross-encode every entity's pairs, not only eligible ones
+  ce_band: ""                # "lo,hi": later cross-encoders score only pairs the first is unsure of
   stage1_model: ""           # a previous run's scale_model.joblib whose stage 1 is reused
   feature_donor_run: ""      # a previous run directory whose cached features are reused
   drop_s1_share: 0.0         # train only: share of S1 businesses removed (simulates test's orphaned copies)

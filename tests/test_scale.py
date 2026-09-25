@@ -456,6 +456,7 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
             "scale.ce_model=unused_a,unused_b",
             "scale.ce_pool_context=true",
             "scale.ce_train_all=true",
+            "scale.ce_band=0.2,0.9",
             f'scale.ce_python=\'"{Path(sys.executable).as_posix()}" "{fake}"\'',
             "scale.ce_min_p1=0.001",
             "scale.train_sample=250",
@@ -473,6 +474,40 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
     names = pd.read_csv(run_dir / "feature_importance_stage2.tsv", sep="\t")["feature"].tolist()
     assert {"ce", "ce_rank_s1", "ce_gap_s1", "ce_margin_s1", "ce2", "ce2_rank_s1"} <= set(names)
     assert {"ce_rank_pool", "ce_gap_pool", "ce_margin_pool", "ce2_rank_pool"} <= set(names)
+
+
+def test_banded_cross_encoder_scores_only_where_the_first_is_unsure(synthetic_dir, tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    from ber.embed import load_frames
+    from ber.scale import cross_scores
+
+    fake = (Path(__file__).parent / "fake_crossenc.py").as_posix()
+    cfg = load_config(
+        None,
+        [
+            "scale.ce_model=unused_a,unused_b",
+            f'scale.ce_python=\'"{Path(sys.executable).as_posix()}" "{fake}"\'',
+            "scale.ce_min_p1=0.5",
+            "scale.ce_band=0.3,0.8",
+        ],
+    )
+    s1, pool = load_frames(synthetic_dir, "train")
+    rng = np.random.default_rng(0)
+    rows = rng.integers(0, len(s1), 400)
+    cols = rng.integers(0, len(pool), 400)
+    p1 = rng.random(400)
+    sd = SimpleNamespace(name="train", rows=rows, cols=cols)
+    out = cross_scores(sd, cfg, p1, synthetic_dir, tmp_path)
+    ce, ce2 = out["ce"], out["ce2"]
+    gated = p1 >= 0.5
+    assert np.isnan(ce[~gated]).all() and np.isnan(ce2[~gated]).all()
+    assert not np.isnan(ce[gated]).any() and not np.isnan(ce2[gated]).any()
+    unsure = gated & (ce > 0.3) & (ce < 0.8)
+    with np.load(tmp_path / "train_ce2_pairs.npz") as z:
+        assert len(z["rows"]) == unsure.sum()  # the second model saw only the unsure pairs
+    assert np.array_equal(ce2[gated & ~unsure], ce[gated & ~unsure])  # elsewhere: first's score
 
 
 def test_detail_features_tell_neighbours_from_typos():
