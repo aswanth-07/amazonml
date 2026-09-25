@@ -168,7 +168,18 @@ def test_country_index_matches_brute_force():
     q_country = rng.choice(["us", "in"], 40)
     d_country = rng.choice(["us", "in", ""], 200)
     index = CountryIndex(dn, da, d_country, partition=True)
-    rows, cols = index.search(qn, qa, q_country, m_comb=4, m_name=3, m_addr=2, wn2=0.36, wa2=0.64, n_threads=2, chunk_rows=7)
+    rows, cols = index.search(
+        qn,
+        qa,
+        q_country,
+        m_comb=4,
+        m_name=3,
+        m_addr=2,
+        wn2=0.36,
+        wa2=0.64,
+        n_threads=2,
+        chunk_rows=7,
+    )
     got = set(zip(rows.tolist(), cols.tolist()))
     sn, sa = (qn @ dn.T).toarray(), (qa @ da.T).toarray()
     for i in range(40):
@@ -214,3 +225,14 @@ def test_scale_run_on_synthetic(synthetic_dir, tmp_path: Path):
     assert summary["train_blocking"]["pair_recall"] > 0.95
     assert summary["test"]["scored"]["fbeta"] > 0.8
     assert (tmp_path / "artifacts" / "scale_model.joblib").exists()
+
+    # a rerun reads the blocking and feature caches and reproduces the outputs exactly
+    cache = tmp_path / "cache"
+    for split in ("train", "test"):
+        assert len(list(cache.glob(f"{split}_blocking_*.joblib"))) == 1
+        assert len(list(cache.glob(f"{split}_features_*.json"))) == 1
+    again = run(cfg, synthetic_dir, tmp_path / "out2")
+    assert again["train_blocking"] == summary["train_blocking"]
+    for name in ("matching_results.tsv", "candidate_pairs.tsv"):
+        a = (tmp_path / "out" / name).read_bytes()
+        assert a == (tmp_path / "out2" / name).read_bytes()

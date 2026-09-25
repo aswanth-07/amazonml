@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -70,14 +71,35 @@ STAGE2_KEEP = (
 )  # fmt: skip
 
 
+BLOCKING_VERSION = 1  # bump when tokens, weighting or search change which pairs blocking returns
+FEATURE_VERSION = 1  # bump when the stage-1 pair features change
+
+
 # ----------------------------------------------------------------------------- tables
+def _sha(raw: str) -> str:
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
 def _cache_key(path: Path, cfg: Config) -> str:
     """Identify a source file's cached table by its location, size, mtime and normaliser settings."""
-    import hashlib
-
     st = path.stat()
-    raw = f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}|{cfg.normalize.transliterate}|{__version__}"
-    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+    return _sha(
+        f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}|{cfg.normalize.transliterate}|{__version__}"
+    )
+
+
+def split_key(data_dir: str | Path, split: str, cfg: Config) -> str:
+    """Identify a split's candidate set: its three tables plus every setting blocking reads."""
+    sc = cfg.scale
+    tables = [
+        _cache_key(Path(data_dir) / split / schema.source_file(split, s), cfg) for s in (1, 2, 3)
+    ]
+    settings = (
+        sc.k, sc.k_name, sc.k_addr, sc.k_reverse, sc.generate, sc.generate_name, sc.generate_addr,
+        sc.generate_reverse, sc.name_weight, sc.df_cap, sc.query_budget,
+        cfg.blocking.partition_by_country, BLOCKING_VERSION,
+    )  # fmt: skip
+    return _sha(f"{split}|{tables}|{settings}")
 
 
 def load_tables(data_dir: str | Path, split: str, cfg: Config) -> tuple[Table, Table]:
@@ -110,9 +132,41 @@ class SplitData:
     num_q: sp.csr_matrix
     num_d: sp.csr_matrix
     stats: dict[str, float] = field(default_factory=dict)
+    key: str = ""  # identifies the candidate set for the caches; empty: do not cache
 
 
-def block_split(s1: Table, pool: Table, cfg: Config, name: str) -> SplitData:
+def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -> SplitData:
+    """Candidate pairs, their cosines and group context. With a ``key``, the pairs, cosines
+    and number matrices are cached, so a rerun skips hashing and search entirely."""
+    path = Path(cfg.scale.cache_dir) / f"{name}_blocking_{key}.joblib" if key else None
+    if path is not None and path.exists():
+        with timed(f"{name}: load cached blocking {path.name}"):
+            c = joblib.load(path)
+        rows, cols, base, mq, md = c["rows"], c["cols"], c["base"], c["num_q"], c["num_d"]
+    else:
+        rows, cols, base, mq, md = _block(s1, pool, cfg, name)
+        if path is not None:
+            with timed(f"{name}: save blocking cache {path.name}"):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                joblib.dump(
+                    {"rows": rows, "cols": cols, "base": base, "num_q": mq, "num_d": md}, tmp
+                )
+                tmp.replace(path)
+    with timed(f"{name}: group context"):
+        base.update(group_features(rows, cols, base))
+    stats = {
+        "pairs": float(len(rows)),
+        "candidates_per_s1": float(len(rows) / max(len(s1), 1)),
+        "s1_without_candidates": float(len(s1) - len(np.unique(rows))),
+        "reduction_ratio": float(1 - len(rows) / max(len(s1) * len(pool), 1)),
+    }
+    log.info("%s: %s", name, stats)
+    return SplitData(name, s1, pool, rows, cols, base, mq, md, stats, key)
+
+
+def _block(s1: Table, pool: Table, cfg: Config, name: str):
+    """Hash, weight, search: (rows, cols sorted by S1 then score, cosines, number matrices)."""
     sc = cfg.scale
     with timed(f"{name}: hash tokens"):
         nq, nd = hash_docs(name_docs(s1), sc.n_jobs), hash_docs(name_docs(pool), sc.n_jobs)
@@ -136,16 +190,7 @@ def block_split(s1: Table, pool: Table, cfg: Config, name: str) -> SplitData:
     order = np.lexsort((-base["score"], rows))
     rows, cols = rows[order].astype(np.int32), cols[order].astype(np.int32)
     base = {k: v[order] for k, v in base.items()}
-    with timed(f"{name}: group context"):
-        base.update(group_features(rows, cols, base))
-    stats = {
-        "pairs": float(len(rows)),
-        "candidates_per_s1": float(len(rows) / max(len(s1), 1)),
-        "s1_without_candidates": float(len(s1) - len(np.unique(rows))),
-        "reduction_ratio": float(1 - len(rows) / max(len(s1) * len(pool), 1)),
-    }
-    log.info("%s: %s", name, stats)
-    return SplitData(name, s1, pool, rows, cols, base, mq, md, stats)
+    return rows, cols, base, mq, md
 
 
 @dataclass
@@ -270,6 +315,45 @@ def pair_features(sd: SplitData, idx: np.ndarray) -> pd.DataFrame:
     cols_out.update(string_features(sd.s1, sd.pool, rows, cols))
     cols_out.update(number_features(sd.num_q, sd.num_d, rows, cols))
     return pd.DataFrame(cols_out)
+
+
+def feature_matrix(sd: SplitData, cfg: Config) -> tuple[np.ndarray, list[str]]:
+    """Every candidate pair's stage-1 features as one float32 matrix, in pair order.
+
+    With a split key it is a memory-mapped ``.npy`` in the cache directory; its column
+    names are written last, so a file from an interrupted run is never mistaken for
+    a finished one.
+    """
+    n = len(sd.rows)
+    path = (
+        Path(cfg.scale.cache_dir) / f"{sd.name}_features_{sd.key}_v{FEATURE_VERSION}.npy"
+        if sd.key
+        else None
+    )
+    names_path = path.with_suffix(".json") if path is not None else None
+    if path is not None and path.exists() and names_path.exists():
+        log.info("%s: cached features %s", sd.name, path.name)
+        return np.load(path, mmap_mode="r"), json.loads(names_path.read_text())
+    out, names = None, []
+    for idx in _chunks(n, cfg.scale.feature_chunk):
+        with timed(f"{sd.name}: features {idx[0]:,}-{idx[-1]:,} of {n:,}"):
+            x = pair_features(sd, idx)
+            if out is None:
+                names = list(x.columns)
+                shape = (n, len(names))
+                if path is not None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    out = np.lib.format.open_memmap(path, "w+", np.float32, shape)
+                else:
+                    out = np.empty(shape, np.float32)
+            out[idx[0] : idx[-1] + 1] = x[names].to_numpy(np.float32)
+    if out is None:
+        names = list(pair_features(sd, np.arange(0)).columns)
+        out = np.empty((0, len(names)), np.float32)
+    if path is not None and n:
+        out.flush()
+        names_path.write_text(json.dumps(names))
+    return out, names
 
 
 # ----------------------------------------------------------------------------- labels
@@ -409,17 +493,26 @@ def _chunks(n: int, size: int):
 
 
 def score_all(
-    sd: SplitData, cfg: Config, stage1: list, feature_names: list[str], override: dict | None = None
+    sd: SplitData,
+    cfg: Config,
+    stage1: list,
+    feature_names: list[str],
+    feats: np.ndarray,
+    feats_names: list[str],
+    override: dict | None = None,
 ):
     """Stage-1 probabilities for every pair (chunked), plus the columns stage 2 keeps."""
-    p1 = np.empty(len(sd.rows), dtype=np.float32)
-    keep = {k: np.empty(len(sd.rows), dtype=np.float32) for k in STAGE2_KEEP}
-    for idx in _chunks(len(sd.rows), cfg.scale.feature_chunk):
-        with timed(f"{sd.name}: features+predict {idx[0]:,}-{idx[-1]:,}"):
-            x = pair_features(sd, idx)[feature_names]
-            p1[idx] = predict_avg(stage1, x)
+    n = len(sd.rows)
+    pos = [feats_names.index(c) for c in feature_names]
+    p1 = np.empty(n, dtype=np.float32)
+    keep = {k: np.empty(n, dtype=np.float32) for k in STAGE2_KEEP}
+    for idx in _chunks(n, cfg.scale.feature_chunk):
+        s, e = idx[0], idx[-1] + 1
+        with timed(f"{sd.name}: predict {s:,}-{e:,}"):
+            block = np.asarray(feats[s:e])
+            p1[s:e] = predict_avg(stage1, pd.DataFrame(block[:, pos], columns=feature_names))
             for k in STAGE2_KEEP:
-                keep[k][idx] = x[k].to_numpy(dtype=np.float32)
+                keep[k][s:e] = block[:, feats_names.index(k)]
     if override is not None:
         p1[override["idx"]] = override["p1"]
     return p1, keep
@@ -488,7 +581,7 @@ def run(
     # ---- train: block every S1 entity against the whole pool
     s1, pool = load_tables(data_dir, "train", cfg)
     truth = load_split_truth(data_dir)
-    sd = block_split(s1, pool, cfg, "train")
+    sd = block_split(s1, pool, cfg, "train", split_key(data_dir, "train", cfg))
     labels, n_true = pair_labels(sd, truth)
     summary["train_blocking"] = {**sd.stats, **blocking_recall(sd, labels, n_true, cfg.beta)}
     log.info("train blocking: %s", summary["train_blocking"])
@@ -501,16 +594,19 @@ def run(
     in_sample[sample] = True
     holdout = np.flatnonzero(~in_sample)
     sidx = np.flatnonzero(in_sample[sd.rows])
+    feats, feature_names = feature_matrix(sd, cfg)
     with timed("train: sample features"):
-        xs = pair_features(sd, sidx)
-    feature_names = list(xs.columns)
+        xs = pd.DataFrame(np.asarray(feats[sidx]), columns=feature_names)
     ys = labels[sidx].astype(np.int8)
     oof1, stage1, iters1 = fit_folds(xs, ys, sd.rows[sidx], cfg, "stage1")
     del xs
     _feature_importance(stage1, feature_names).to_csv(
         run_dir / "feature_importance.tsv", sep="\t", index=False
     )
-    p1, keep = score_all(sd, cfg, stage1, feature_names, override={"idx": sidx, "p1": oof1})
+    p1, keep = score_all(
+        sd, cfg, stage1, feature_names, feats, feature_names, override={"idx": sidx, "p1": oof1}
+    )
+    del feats
     sd.base = {"score": sd.base["score"]}  # group context no longer needed; free it
     summary["stage1"] = _stage_report(sd, p1, labels, n_true, sample, holdout, cfg, iters1)
     _write_json(run_dir / "metrics.json", summary)
@@ -644,8 +740,10 @@ def predict_split(
     model: TrainedModel, cfg: Config, data_dir: str | Path, out_dir: str | Path, split: str = "test"
 ) -> dict[str, Any]:
     s1, pool = load_tables(data_dir, split, cfg)
-    sd = block_split(s1, pool, cfg, split)
-    p1, keep = score_all(sd, cfg, model.stage1, model.feature_names)
+    sd = block_split(s1, pool, cfg, split, split_key(data_dir, split, cfg))
+    feats, feats_names = feature_matrix(sd, cfg)
+    p1, keep = score_all(sd, cfg, model.stage1, model.feature_names, feats, feats_names)
+    del feats
     probs = p1
     if model.stage2:
         cand_score = sd.base["score"]
