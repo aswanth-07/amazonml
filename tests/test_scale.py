@@ -319,6 +319,8 @@ def test_scale_run_with_embedding_view(synthetic_dir, tmp_path: Path):
     run_dir = next((tmp_path / "runs" / "fresh").iterdir())
     names = pd.read_csv(run_dir / "feature_importance.tsv", sep="\t")["feature"].tolist()
     assert {"cos_emb", "cos_emb_rank_s1", "cos_emb_margin_pool"} <= set(names)
+    names2 = pd.read_csv(run_dir / "feature_importance_stage2.tsv", sep="\t")["feature"].tolist()
+    assert {"coh_emb", "partner_p1", "cos_emb"} <= set(names2)
     scores = np.load(run_dir / "train_scores.npz")
     assert len(scores["p"]) == len(scores["rows"]) == len(scores["labels"])
     assert (run_dir / "test_scores.npz").exists()
@@ -354,6 +356,21 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
     run_dir = next((tmp_path / "runs").iterdir())
     names = pd.read_csv(run_dir / "feature_importance_stage2.tsv", sep="\t")["feature"].tolist()
     assert {"ce", "ce_rank_s1", "ce_gap_s1", "ce_margin_s1"} <= set(names)
+
+
+def test_coherence_partner_is_the_best_other_candidate():
+    from ber.scale import coherence_columns
+
+    emb = np.eye(4, dtype=np.float16)
+    emb[3] = emb[0]  # pool record 3 is a copy of record 0
+    rows = np.array([0, 0, 0, 1])
+    cols = np.array([0, 1, 3, 2])
+    p1 = np.array([0.9, 0.2, 0.5, 0.7], np.float32)
+    f = coherence_columns(rows, cols, p1, emb)
+    # partner of the best (col 0) is the second best (col 3); the others pair with col 0
+    assert f["coh_emb"][:3].tolist() == [1.0, 0.0, 1.0]
+    assert f["partner_p1"][:3].tolist() == pytest.approx([0.5, 0.9, 0.9])
+    assert np.isnan(f["coh_emb"][3]) and np.isnan(f["partner_p1"][3])  # entity with one pair
 
 
 def test_ce_columns_rank_only_scored_pairs():

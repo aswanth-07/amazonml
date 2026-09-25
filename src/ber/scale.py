@@ -588,6 +588,43 @@ def cross_scores(
     return ce
 
 
+def coherence_columns(
+    rows: np.ndarray, cols: np.ndarray, p1: np.ndarray, emb_pool: np.ndarray
+) -> dict[str, np.ndarray]:
+    """How much a candidate resembles its entity's most probable other candidate.
+
+    An entity's true matches are variants of one business, so a candidate close
+    to a confident match is likelier to be one too. Partner: the entity's best
+    pair by stage-1 probability, or its second best for the best pair itself.
+    """
+    from ber.embed import dense_row_dot
+
+    n = len(rows)
+    order = np.lexsort((-p1, rows))
+    r = rows[order]
+    new = np.ones(n, dtype=bool)
+    new[1:] = r[1:] != r[:-1]
+    starts = np.flatnonzero(new)
+    sizes = np.diff(np.append(starts, n))
+    first = order[starts]
+    second = np.where(sizes > 1, order[np.minimum(starts + 1, n - 1)], -1)
+    gid = np.empty(n, dtype=np.int64)
+    gid[order] = np.cumsum(new) - 1
+    partner = np.where(np.arange(n) == first[gid], second[gid], first[gid])
+    has = np.flatnonzero(partner >= 0)
+    coh = np.full(n, np.nan, dtype=np.float32)
+    coh[has] = dense_row_dot(emb_pool, emb_pool, cols[has], cols[partner[has]])
+    partner_p1 = np.full(n, np.nan, dtype=np.float32)
+    partner_p1[has] = p1[partner[has]]
+    return {"coh_emb": coh, "partner_p1": partner_p1}
+
+
+def _pool_embeddings(sd: SplitData, cfg: Config) -> np.ndarray:
+    from ber.embed import load_embeddings
+
+    return load_embeddings(cfg.scale.emb_dir, sd.name, sd.s1.ids, sd.pool.ids)[1]
+
+
 def ce_columns(rows: np.ndarray, ce: np.ndarray) -> dict[str, np.ndarray]:
     """The cross-encoder probability and how it ranks among the entity's scored candidates."""
     v = np.nan_to_num(ce, nan=-1.0)
@@ -807,6 +844,9 @@ def run(
         keep.update(ce_columns(sd.rows, ce))
         summary["cross_encoder_pairs"] = int((~np.isnan(ce)).sum())
         del ce
+    if cfg.scale.emb_dir:
+        with timed("train: coherence"):
+            keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))
 
     # ---- stage 2: stage-1 probabilities in context
     if cfg.scale.stage2:
@@ -976,9 +1016,11 @@ def predict_split(
         cand_score = sd.base["score"]
         sd.base = {"score": cand_score}
         if "ce" in model.stage2_names:
-            keep.update(
-                ce_columns(sd.rows, cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir)))
-            )
+            ce = cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir))
+            keep.update(ce_columns(sd.rows, ce))
+            del ce
+        if "coh_emb" in model.stage2_names:
+            keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))
         cols2 = stage2_columns(sd.rows, sd.cols, p1, keep)
         del keep
         probs = predict_columns(
