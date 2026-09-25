@@ -48,6 +48,7 @@ from ber.metrics import (
     precision_recall,
 )
 from ber.pairfeat import (
+    cluster_features,
     collective_features,
     collective_stats,
     detail_features,
@@ -89,7 +90,7 @@ STAGE2_KEEP = (
 
 
 BLOCKING_VERSION = 1  # bump when tokens, weighting or search change which pairs blocking returns
-FEATURE_VERSION = 3  # bump when the stage-1 pair features change
+FEATURE_VERSION = 4  # bump when the stage-1 pair features change
 
 
 # ----------------------------------------------------------------------------- tables
@@ -411,6 +412,7 @@ FEATURE_GROUPS: dict[str, Any] = {
     "number": lambda sd, r, c: number_features(sd.num_q, sd.num_d, r, c),
     "detail": lambda sd, r, c: detail_features(sd.s1, sd.pool, r, c),
     "collective": lambda sd, r, c: collective_features(sd.s1, sd.pool, r, c, _collective(sd)),
+    "cluster": lambda sd, r, c: cluster_features(r, c, _collective(sd)),
 }
 
 

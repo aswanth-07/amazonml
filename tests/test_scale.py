@@ -524,6 +524,36 @@ def test_collective_features_count_addresses_names_and_aliases():
     assert np.isnan(f["alias_link"][2])
 
 
+def test_cluster_features_place_an_address_less_candidate():
+    from ber.pairfeat import cluster_features, collective_stats
+    from ber.table import build_table
+
+    def table(rows, source):
+        df = pd.DataFrame(
+            rows, columns=["entity_id", "business_name", "business_address", "country"]
+        )
+        return build_table(df, source, True, n_jobs=1)
+
+    s1 = table([("S1-1", "Himalaya Films", "12 MG Road, Pune", "India"),
+                ("S1-2", "Himalaya Films", "99 FC Road, Pune", "India"),
+                ("S1-3", "Kolkata Services", "5 Park St, Kolkata", "India")], 1)  # fmt: skip
+    pool = table([("S2-1", "Himalaya Films", "Pune, 12 MG Rd", "India"),  # copy of S1-1
+                  ("S2-2", "Himalaya Films", "", "India"),  # address lost: whose?
+                  ("S3-1", "Himalaya Films", "FC Road 99, Pune", "India"),  # copy of S1-2
+                  ("S2-3", "Kolkata Services", "", "India"),  # address lost
+                  ("S3-2", "Kolkata Services", "5 Park Street, Kolkata", "India")], 2)  # fmt: skip
+    stats = collective_stats(s1, pool)
+    f = cluster_features(np.array([0, 2]), np.array([1, 3]), stats)
+    # Himalaya Films has records at both S1 addresses: one supports S1-1, one conflicts
+    assert f["cluster_addr_support"][0] == 1 and f["cluster_conflict"][0] == 1
+    # Kolkata Services only ever appears at S1-3's address: support 1, conflict 0
+    assert f["cluster_addr_support"][1] == 1 and f["cluster_conflict"][1] == 0
+    assert f["pool_addr_empty"].tolist() == [1.0, 1.0]
+    # a located candidate does not count itself
+    g = cluster_features(np.array([0]), np.array([0]), stats)
+    assert g["cluster_addr_support"][0] == 0 and g["cluster_located"][0] == 1
+
+
 def test_coherence_partner_is_the_best_other_candidate():
     from ber.scale import coherence_columns
 

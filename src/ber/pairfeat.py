@@ -219,6 +219,49 @@ def _count_in(keys: np.ndarray, reference: np.ndarray) -> np.ndarray:
     return np.where((len(uniq) > 0) & (uniq[at] == keys), counts[at], 0).astype(np.float32)
 
 
+_MIX = 1_000_000_007
+
+
+def _counter(keys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    uniq, counts = np.unique(keys, return_counts=True)
+    return uniq, counts.astype(np.float32)
+
+
+def _lookup(keys: np.ndarray, counter: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    uniq, counts = counter
+    if len(uniq) == 0:
+        return np.zeros(len(keys), dtype=np.float32)
+    at = np.minimum(np.searchsorted(uniq, keys), len(uniq) - 1)
+    return np.where(uniq[at] == keys, counts[at], 0).astype(np.float32)
+
+
+def cluster_features(rows: np.ndarray, cols: np.ndarray, stats: dict) -> dict[str, np.ndarray]:
+    """Where the candidate's name lives, from its name cluster in the pool.
+
+    Over the other pool records with the candidate's (country, name): how many sit at the
+    S1 record's address (support), on its street, and at another non-empty address
+    (conflict). An address-less candidate cannot be placed by its own address, but its name
+    cluster can: a name that only ever appears at the S1 address hands its address-less
+    member to that business, one that also appears elsewhere has a namesake. In v3, 44% of
+    missed true pairs lost their record to another suitor, typically a namesake.
+    """
+    nk = stats["pool_name_key"][cols]
+    a_s, st_s = stats["s1_addr_key"][rows], stats["s1_street_key"][rows]
+    own_full = ~stats["pool_empty"][cols]
+    own_addr = (own_full & (stats["pool_addr_key"][cols] == a_s)).astype(np.float32)
+    own_street = (own_full & (stats["pool_street_key"][cols] == st_s)).astype(np.float32)
+    support = _lookup(nk * _MIX + a_s, stats["cluster_addr"]) - own_addr
+    street = _lookup(nk * _MIX + st_s, stats["cluster_street"]) - own_street
+    total = _lookup(nk, stats["cluster_total"]) - own_full.astype(np.float32)
+    return {
+        "cluster_addr_support": support,
+        "cluster_street_support": street,
+        "cluster_conflict": total - street,
+        "cluster_located": total,
+        "pool_addr_empty": (~own_full).astype(np.float32),
+    }
+
+
 def collective_stats(s1: Table, pool: Table) -> dict[str, np.ndarray]:
     """Split-wide statistics of each record's address and name (computed once per split).
 
@@ -237,7 +280,20 @@ def collective_stats(s1: Table, pool: Table) -> dict[str, np.ndarray]:
     for core, alias in zip(npool, pool.alias):
         if alias:
             aliases.setdefault(core, []).append(alias)
+    # name clusters: where the pool records of each (country, name) sit
+    name_p = cp * 4_294_967_311 + pd.util.hash_array(npool).astype(np.int64)
+    empty_p = np.fromiter((not a for a in pool.addr), dtype=bool, count=len(pool))
+    full = ~empty_p
     return {
+        "pool_name_key": name_p,
+        "pool_addr_key": k_addrp,
+        "pool_street_key": k_streetp,
+        "pool_empty": empty_p,
+        "s1_addr_key": k_addr1,
+        "s1_street_key": k_street1,
+        "cluster_addr": _counter(name_p[full] * _MIX + k_addrp[full]),
+        "cluster_street": _counter(name_p[full] * _MIX + k_streetp[full]),
+        "cluster_total": _counter(name_p[full]),
         "s1_at_addr_of_pool": _count_in(k_addrp, k_addr1),  # Source 1 businesses at p's address
         "s1_at_own_addr": _count_in(k_addr1, k_addr1),  # ... at s's own address
         "pool_at_addr_of_pool": _count_in(k_addrp, k_addrp),  # pool records at p's address
