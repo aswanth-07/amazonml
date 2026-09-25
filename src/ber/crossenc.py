@@ -211,9 +211,33 @@ def score(
     return out
 
 
+def evaluate(p: np.ndarray, y: np.ndarray) -> dict[str, float]:
+    """AUC (rank-based), log-loss, and accuracy and F0.5 at the best threshold."""
+    p = p.astype(np.float64)
+    order = np.argsort(p, kind="stable")
+    ranks = np.empty(len(p))
+    ranks[order] = np.arange(1, len(p) + 1)
+    n_pos, n_neg = int(y.sum()), int((~y).sum())
+    auc = (ranks[y].sum() - n_pos * (n_pos + 1) / 2) / max(n_pos * n_neg, 1)
+    q = np.clip(p, 1e-6, 1 - 1e-6)
+    logloss = float(-np.mean(np.where(y, np.log(q), np.log(1 - q))))
+    best = 0.0
+    for t in np.arange(0.05, 0.96, 0.05):
+        pred = p >= t
+        tp = float((pred & y).sum())
+        prec, rec = tp / max(pred.sum(), 1), tp / max(n_pos, 1)
+        best = max(best, 1.25 * prec * rec / max(0.25 * prec + rec, 1e-9))
+    return {
+        "auc": round(float(auc), 5),
+        "logloss": round(logloss, 5),
+        "best_pair_f05": round(best, 5),
+        "pairs": len(p),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ber.crossenc")
-    ap.add_argument("command", choices=["train", "score"])
+    ap.add_argument("command", choices=["train", "score", "eval"])
     ap.add_argument("--data-dir", default="student_resource/dataset")
     ap.add_argument("--init", default="models/e5-small-ft")
     ap.add_argument("--model", default="models/ce-small")
@@ -231,6 +255,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "train":
         train(args.data_dir, args.init, args.blocking, args.model, args.n_neg, args.max_pairs,
               knn=args.knn, n_neg_knn=args.n_neg_knn)  # fmt: skip
+    elif args.command == "eval":  # --pairs npz with rows, cols, labels; --model a,b,...
+        with np.load(args.pairs) as z:
+            rows, cols, y = z["rows"], z["cols"], z["labels"].astype(bool)
+        for model in args.model.split(","):
+            print(
+                model, json.dumps(evaluate(score(model, args.data_dir, args.split, rows, cols), y))
+            )
     else:
         with np.load(args.pairs) as z:
             rows, cols = z["rows"], z["cols"]
