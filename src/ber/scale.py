@@ -766,19 +766,25 @@ def _pool_embeddings(sd: SplitData, cfg: Config) -> np.ndarray:
     return load_embeddings(cfg.scale.emb_dir, sd.name, sd.s1.ids, sd.pool.ids)[1]
 
 
-def ce_columns(rows: np.ndarray, ce: np.ndarray, prefix: str = "ce") -> dict[str, np.ndarray]:
-    """The cross-encoder probability and how it ranks among the entity's scored candidates."""
+def ce_columns(
+    rows: np.ndarray, ce: np.ndarray, prefix: str = "ce", cols: np.ndarray | None = None
+) -> dict[str, np.ndarray]:
+    """The cross-encoder probability and how it ranks among the entity's scored candidates
+    and, with ``cols``, among the pool record's scored suitors: whether another business got
+    a higher cross-encoder score for the same record decides who owns it (44% of v3's missed
+    true pairs lost their record to another suitor)."""
     v = np.nan_to_num(ce, nan=-1.0)
-    rank, best, second, _ = group_stats(rows, v)
     scored = ~np.isnan(ce)
-    return {
-        prefix: ce,
-        f"{prefix}_rank_s1": np.where(scored, rank, np.nan).astype(np.float32),
-        f"{prefix}_gap_s1": np.where(scored, v - best, np.nan).astype(np.float32),
-        f"{prefix}_margin_s1": np.where(
+    out = {prefix: ce}
+    sides = [("s1", rows)] + ([("pool", cols)] if cols is not None else [])
+    for side, keys in sides:
+        rank, best, second, _ = group_stats(keys, v)
+        out[f"{prefix}_rank_{side}"] = np.where(scored, rank, np.nan).astype(np.float32)
+        out[f"{prefix}_gap_{side}"] = np.where(scored, v - best, np.nan).astype(np.float32)
+        out[f"{prefix}_margin_{side}"] = np.where(
             scored, np.where(rank == 0, v - second, v - best), np.nan
-        ).astype(np.float32),
-    }
+        ).astype(np.float32)
+    return out
 
 
 def _frame(columns: dict[str, np.ndarray], idx: np.ndarray, names: list[str]) -> pd.DataFrame:
@@ -989,8 +995,11 @@ def run(
     final_p, stage2, s2_names, thr = p1, [], [], summary["stage1"]["threshold"]
 
     # ---- cross-encoder on uncertain pairs of entities it was not trained on
-    for prefix, ce in cross_scores(sd, cfg, p1, data_dir, run_dir, only=eligible).items():
-        keep.update(ce_columns(sd.rows, ce, prefix))
+    # scoring every suitor (not only eligible entities') makes pool-side competition in
+    # training look like test, where every suitor is scored
+    ce_only = None if cfg.scale.ce_train_all else eligible
+    for prefix, ce in cross_scores(sd, cfg, p1, data_dir, run_dir, only=ce_only).items():
+        keep.update(ce_columns(sd.rows, ce, prefix, sd.cols if cfg.scale.ce_pool_context else None))
         summary["cross_encoder_pairs"] = int((~np.isnan(ce)).sum())
         del ce
     if cfg.scale.emb_dir:
@@ -1182,7 +1191,8 @@ def predict_split(
         sd.base = {"score": cand_score}
         if "ce" in model.stage2_names:
             for prefix, ce in cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir)).items():
-                keep.update(ce_columns(sd.rows, ce, prefix))
+                pool_ctx = sd.cols if f"{prefix}_rank_pool" in model.stage2_names else None
+                keep.update(ce_columns(sd.rows, ce, prefix, pool_ctx))
                 del ce
         if "coh_emb" in model.stage2_names:
             keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))

@@ -164,6 +164,8 @@ class ScaleConfig:
     ce_python: str = "py -3.13"  # interpreter with torch + transformers that runs it
     ce_min_p1: float = 0.02  # pairs scored by the cross-encoder: stage-1 probability >= this
     ce_wait: int = 0  # seconds to wait for a cross-encoder that is still training
+    ce_pool_context: bool = False  # cross-encoder rank/gap/margin among a pool record's suitors
+    ce_train_all: bool = False  # train: cross-encode every entity's pairs, not only eligible ones
     stage1_model: str = ""  # a previous run's scale_model.joblib whose stage 1 is reused
     feature_donor_run: str = ""  # a previous run directory whose cached features are reused
     drop_s1_share: float = 0.0  # train only: share of S1 businesses removed (orphan simulation)

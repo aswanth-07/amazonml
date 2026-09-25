@@ -454,6 +454,8 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
             f"runs_dir={(tmp_path / 'runs').as_posix()}",
             f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
             "scale.ce_model=unused_a,unused_b",
+            "scale.ce_pool_context=true",
+            "scale.ce_train_all=true",
             f'scale.ce_python=\'"{Path(sys.executable).as_posix()}" "{fake}"\'',
             "scale.ce_min_p1=0.001",
             "scale.train_sample=250",
@@ -470,6 +472,7 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
     run_dir = next((tmp_path / "runs").iterdir())
     names = pd.read_csv(run_dir / "feature_importance_stage2.tsv", sep="\t")["feature"].tolist()
     assert {"ce", "ce_rank_s1", "ce_gap_s1", "ce_margin_s1", "ce2", "ce2_rank_s1"} <= set(names)
+    assert {"ce_rank_pool", "ce_gap_pool", "ce_margin_pool", "ce2_rank_pool"} <= set(names)
 
 
 def test_detail_features_tell_neighbours_from_typos():
@@ -545,3 +548,11 @@ def test_ce_columns_rank_only_scored_pairs():
     assert f["ce_rank_s1"][[0, 2, 3]].tolist() == [1, 0, 0]
     assert np.isnan(f["ce_rank_s1"][1]) and np.isnan(f["ce_gap_s1"][1])
     assert f["ce_margin_s1"][2] == pytest.approx(0.7)
+    # pool side: pool record 5 has two scored suitors; the one at 0.9 leads by 0.4
+    g = ce_columns(
+        np.array([0, 1, 2]), np.array([0.9, 0.5, np.nan], np.float32), cols=np.array([5, 5, 6])
+    )
+    assert g["ce_rank_pool"][:2].tolist() == [0, 1] and np.isnan(g["ce_rank_pool"][2])
+    assert g["ce_margin_pool"][0] == pytest.approx(0.4) and g["ce_gap_pool"][1] == pytest.approx(
+        -0.4
+    )
