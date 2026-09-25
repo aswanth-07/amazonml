@@ -954,7 +954,7 @@ def run(
     # every pair's final probability, for tuning decision rules offline
     np.savez(
         run_dir / "train_scores.npz", rows=sd.rows, cols=sd.cols, p=final_p, labels=labels,
-        n_true=n_true, eligible=eligible, in_sample=in_sample,
+        n_true=n_true, eligible=eligible, in_sample=in_sample, country=s1.country.astype("U"),
     )  # fmt: skip
     model = TrainedModel(
         stage1, stage2, feature_names, s2_names, thr, cfg.to_dict(),
