@@ -82,6 +82,27 @@ model:
     lambda_l2: 1.0
     verbosity: -1
 
+scale:                       # the large-scale path used by `ber run` / `ber cv`
+  k: 20                      # kept per Source 1 entity by combined cosine after re-scoring
+  k_name: 8                  # ... plus its best by name cosine
+  k_addr: 8                  # ... plus its best by address cosine
+  k_reverse: 1               # ... plus each pool record's best Source 1 suitors
+  generate: 100              # wide first pass, combined view (rare tokens only)
+  generate_name: 50          # wide first pass, name view
+  generate_addr: 50          # wide first pass, address view
+  generate_reverse: 5        # wide first pass per pool query (reverse); 0 disables
+  name_weight: 0.6           # name vs address weight in the blocking vector
+  df_cap: 5000               # query tokens more frequent than this in the pool are not searched on
+  query_budget: 6000         # prefix filter: search on each query's rarest tokens up to this summed df
+  n_threads: 16
+  n_jobs: 12
+  chunk_rows: 500
+  block_chunk: 200000        # S1 queries searched, re-scored and selected per pass (bounds memory)
+  train_sample: 300000       # Source 1 entities whose candidates train the matcher
+  feature_chunk: 2000000
+  stage2: true               # stack a second model on out-of-fold first-stage probabilities
+  cache_dir: artifacts/cache
+
 decision:
   strategy: threshold        # threshold | expected_f
   exclusive: true            # each S2/S3 record is given to at most one S1 entity

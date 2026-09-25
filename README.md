@@ -10,9 +10,14 @@ which becomes the submitted `Documentation_template.md`:
 [docs/Documentation_template.md](docs/Documentation_template.md).
 
 ```
-raw TSVs → normalise → blocking (capped union) → pair features → LightGBM → per-entity decision → output/*.tsv
-                          └─ candidate_pairs.tsv                                  └─ matching_results.tsv
+raw TSVs → parallel normalise → multi-view inverted-index blocking → full re-score + select → pair features
+         → LightGBM (stage 1) → stacked LightGBM (stage 2) → exclusive, F0.5-tuned decision → output/*.tsv
+                                        └─ candidate_pairs.tsv                              └─ matching_results.tsv
 ```
+
+Built for the real data: 2.2M Source 1 × 10.3M Source 2/3 records per split,
+on a laptop CPU with about 20 GB of free memory. The design and measurements
+are in [docs/Documentation_template.md](docs/Documentation_template.md).
 
 ## Quick start
 
@@ -53,14 +58,18 @@ ber run --data-dir data/synthetic --out-dir output/synthetic
    | `blocking.partition_by_country=true` | true matches share a country label |
    | `data.quoting=none` | no field starts with a quote |
 
-3. **Baseline with cross-validation:** `ber cv`. The run prints out-of-fold
-   F0.5, the blocking oracle F0.5 (the ceiling blocking allows) and a
-   per-country breakdown. Look in `runs/<timestamp>-cv/` for
-   `errors_false_negative.tsv`, where each miss is labelled
-   `missed_by_blocking` or `rejected_by_matcher`.
-4. **Produce the submission:** `ber run`. This trains on train, tunes on
-   out-of-fold predictions, predicts test, writes `output/`, and validates.
-   Upload `output/matching_results.tsv` to the portal.
+3. **Evaluate on train only:**
+   `ber cv --config src/ber/configs/full.yaml --data-dir student_resource/dataset`.
+   It prints blocking recall and the oracle F0.5 (the ceiling blocking
+   allows), then stage-1 and stage-2 F0.5 on the sampled entities (out of
+   fold) and on the held-out entities. False-positive and false-negative
+   samples are written to `runs/<timestamp>-cv/`.
+4. **Produce the submission:**
+   `ber run --config src/ber/configs/full.yaml --data-dir student_resource/dataset --out-dir output`.
+   This takes about 2 hours. It does everything `cv` does, then blocks and
+   scores test, writes `output/`, and validates it with the local validator.
+   Normalised tables are cached, so later runs skip that step. Upload
+   `output/matching_results.tsv` to the portal.
 5. **Package:** replace `docs/Documentation_template.md` with the official
    template filled from the draft, then run
    `ber package --team <team_name>` to get `<team_name>_submission.zip`.
@@ -72,7 +81,7 @@ ber run --data-dir data/synthetic --out-dir output/synthetic
 | `ber audit` | data-contract checks, noise statistics, assumption checks with recommendations |
 | `ber cv [--config F] [--set k=v]` | out-of-fold evaluation on train, recorded under `runs/` |
 | `ber run` | full pipeline: train, tune, predict test, write and validate `output/` |
-| `ber predict --model artifacts/model.joblib` | re-predict test from a saved model |
+| `ber predict --model artifacts/scale_model.joblib` | re-predict test from a saved model |
 | `ber validate` | local re-implementation of every published rule, plus the official validator if present |
 | `ber score --pred P --truth T` | macro F0.5 of any matching file against a truth file |
 | `ber package --team NAME` | builds the submission zip in the required layout; refuses invalid outputs |

@@ -48,39 +48,55 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_summary(summary: dict, beta: float) -> None:
+    b = summary["train_blocking"]
+    print(
+        f"blocking: pair recall {b['pair_recall']:.4f}, oracle F{beta} {b['oracle_fbeta']:.4f}, {b['candidates_per_s1']:.1f} candidates/S1"
+    )
+    for stage in ("stage1", "stage2"):
+        if stage in summary:
+            s = summary[stage]
+            hold = s.get("holdout", float("nan"))
+            print(
+                f"{stage}: sample OOF F{beta} {s['sample_oof']:.5f}, holdout F{beta} {hold:.5f} (threshold {s['threshold']:.2f})"
+            )
+    full = summary["train_full"]
+    countries = ", ".join(f"{k}: {v['fbeta']:.4f}" for k, v in full["by_country"].items())
+    print(f"train, all entities: F{beta} {full['fbeta']:.5f}; by country {{{countries}}}")
+
+
 def cmd_cv(args: argparse.Namespace) -> int:
-    from ber.pipeline import run_cv
+    from ber.scale import run
 
     cfg = _config(args)
-    result, run = run_cv(cfg, cfg.data.data_dir, args.tag)
-    m = result.metrics
-    print(f"OOF macro F{cfg.beta}: {m['fbeta']:.4f}  (param {result.param:.2f})")
-    print(
-        f"blocking oracle F{cfg.beta}: {m['blocking']['oracle_fbeta']:.4f}  pair recall {m['blocking']['pair_recall']:.4f}"
-    )
-    print(f"by country: { {k: round(v['fbeta'], 4) for k, v in m['by_country'].items()} }")
-    print(f"run: {run.path}")
+    summary = run(cfg, cfg.data.data_dir, cfg.output_dir, args.tag, predict_test=False)
+    _print_summary(summary, cfg.beta)
     return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    from ber.pipeline import run_full
+    from ber.scale import run
 
     cfg = _config(args)
     out_dir = args.out_dir or cfg.output_dir
-    summary = run_full(cfg, cfg.data.data_dir, out_dir, args.tag)
-    print(f"OOF macro F{cfg.beta}: {summary['cv']['fbeta']:.4f}")
+    summary = run(cfg, cfg.data.data_dir, out_dir, args.tag)
+    _print_summary(summary, cfg.beta)
     if "scored" in summary["test"]:
         print(f"test macro F{cfg.beta} (synthetic truth): {summary['test']['scored']['fbeta']:.4f}")
     return 0 if summary["test"]["validation_ok"] else 1
 
 
 def cmd_predict(args: argparse.Namespace) -> int:
-    from ber.pipeline import predict_only
+    import joblib
 
-    path = predict_only(args.model, args.data_dir, args.out_dir)
-    print(f"wrote {path}")
-    return 0
+    from ber.config import from_dict
+    from ber.scale import predict_split
+
+    model = joblib.load(args.model)
+    cfg = from_dict(model.config)
+    out = predict_split(model, cfg, args.data_dir, args.out_dir)
+    print(json.dumps(out, indent=2, default=str))
+    return 0 if out["validation_ok"] else 1
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -177,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("predict", help="predict test with a saved model artifact")
-    sp.add_argument("--model", default="artifacts/model.joblib")
+    sp.add_argument("--model", default="artifacts/scale_model.joblib")
     sp.add_argument("--data-dir", default="dataset")
     sp.add_argument("--out-dir", default="output")
     sp.set_defaults(func=cmd_predict)

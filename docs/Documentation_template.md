@@ -1,186 +1,223 @@
-# Business Entity Resolution: Methodology
+# ML Challenge 2026: Business Entity Resolution Solution Template
 
-> **Draft.** Written before the dataset arrived. When the organisers'
-> `Documentation_template.md` arrives, move this content into their headings
-> and fill every `TODO(data)` with numbers from `runs/<run>/metrics.json`.
-> This file is what `ber package` puts at the root of the submission zip.
+**Team Name:** TODO(team)
+**Team Members:** TODO(team)
+**Submission Date:** TODO(date)
 
-## 1. Overview
+---
 
-The pipeline has five stages, each a separate module that can be tested and
-measured on its own:
+## 1. Executive Summary
 
-```
-raw TSVs ─▶ normalise ─▶ candidate generation ─▶ pair features ─▶ LightGBM matcher ─▶ per-entity decision ─▶ outputs
-            (names,      (union of blockers,      (76 features)     (GroupKFold OOF)     (exclusive, tuned
-             addresses)   capped per S1)                                                  for macro F0.5)
-```
+A three-stage entity-resolution pipeline built for scale (2.2M Source 1 × 10.3M
+Source 2/3 records per split):
 
-The design follows from the metric. Macro F0.5 averages over every Source 1
-entity, singletons included. A false merge on a singleton costs a full point
-for that entity, and precision counts about twice as much as recall. So the
-final decision is made **per Source 1 entity**, and its operating point is
-**tuned on out-of-fold predictions against the exact leaderboard formula**.
+1. Multi-view inverted-index blocking on a laptop CPU, with prefix filtering
+   and full-cosine re-scoring.
+2. A LightGBM matcher over 70+ string, token, number and group-context
+   features.
+3. A stacked second LightGBM that reads each first-stage probability in the
+   context of the entity's other candidates and the record's other suitors.
 
-Results (5-fold, grouped by Source 1 entity, on train):
+Exclusive assignment enforces "each Source 2/3 record belongs to at most one
+Source 1 entity". One threshold is tuned for the exact leaderboard macro F0.5,
+including singletons.
 
-| Quantity | Value |
-|---|---|
-| Blocking pair recall | TODO(data) |
-| Blocking oracle F0.5 (perfect matcher on our candidates) | TODO(data) |
-| Candidates per S1 entity / reduction ratio | TODO(data) |
-| Out-of-fold macro F0.5 | TODO(data) |
-| Out-of-fold F0.5 by country (US / India) | TODO(data) |
-| Singleton accuracy | TODO(data) |
-| Public leaderboard | TODO(data) |
+---
 
-## 2. Normalisation
+## 2. Methodology
 
-Normalisation uses rules only, is symmetric across sources, and does no
-external lookup (`src/ber/normalize/`).
+### 2.1 Problem Analysis
 
-- **Script and punctuation.** NFKC, transliteration of non-Latin scripts to
-  ASCII (anyascii) with Latin accents folded, casefolding, `&` → "and",
-  dotted acronyms joined (L.L.C. → llc), apostrophes dropped, other
-  punctuation turned into spaces.
-- **Names.** Multi-word legal forms are canonicalised (private limited → pvt
-  ltd, société à responsabilité limitée → sarl), and single tokens map to a
-  canonical short form (corporation → corp, limited → ltd). Legal forms are
-  split off into their own field, so "Acme Corp" and "Acme Corporation" share
-  a *core* name while the suffix remains evidence. Trade names after
-  DBA/"trading as" become an alias field. The acronym of the core tokens is
-  kept, and so is a **transliteration skeleton** (ksh→x, sh→s, ee→i,
-  doubled letters collapsed). With the skeleton, Lakshmi/Laxmi,
-  Shree/Sri/Shri and Venkateswara/Venkateshwara compare as equal.
-- **Addresses.** The address is split into components on commas. Street types
-  map to one canonical form: Road/Rd/Marg → rd, avenue/av → ave,
-  boulevard/bd → blvd, French rue, chemin, allée, impasse. US state names
-  map to their codes, and romanised Indian city variants (Bangalore →
-  Bengaluru, Bombay → Mumbai) to one spelling. **Landmark phrases** ("near",
-  "opp", "behind" and the rest of that component) go into a separate field so
-  they do not dilute the street match. **Postal codes** are extracted as
-  5-6 digit codes; a spaced PIN such as "560 001" is joined, and a leading
-  5-digit house number is not taken for a ZIP. House and unit numbers go
-  into their own set.
-- **Country.** Aliases map to one label (US/USA/United States) and unknown
-  labels pass through unchanged. The pipeline never enumerates countries.
+Findings from the training data:
 
-## 3. Candidate generation (blocking)
+- **Scale.** Train has 2,206,821 Source 1 and 10,320,219 Source 2/3 records;
+  test has 1,732,544 and 9,969,589.
+- **Structure.**
+  - Source 1 is deduplicated. In the training truth no Source 2/3 id belongs
+    to more than one Source 1 entity, so the mapping is exclusive.
+  - Mean 3.46 true matches per entity. 5.6% of entities are singletons; 2.4%
+    have 7 or more matches.
+  - About 26% of Source 2/3 records match no Source 1 entity. These are the
+    natural false-merge traps.
+  - True pairs always share the country label.
+- **Name noise.**
+  - Legal forms dropped, abbreviated or moved to the front ("LLC Sapphire").
+  - Honorifics ("Mr", "Dr", "Smt", "M/s") and junk prefixes ("--", "<<", "***").
+  - Id tags ("#30473", "(ID: 96415)"), brackets, hyphenation, spacing.
+  - Digit-for-letter typos ("G1obal", "6lobal") and ordinary typos.
+  - Word-order swaps.
+  - Former and trade names ("X fka Y", "X formerly known as Y", "X t/a Y",
+    "X dba Y").
+  - Whole-name domains and hashtags ("lynx.com", "#baskervillemeadows").
+  - Accents injected into English names.
+  - About 20% of Indian Source 2 names written in Indic scripts (Devanagari,
+    Gurmukhi, Bengali, Gujarati, Tamil, Kannada, Telugu).
+- **Address noise.**
+  - Components reordered ("BELLEVILLE, IL, 57 WINDSOR DR").
+  - Street-type abbreviations.
+  - State as full name, postal code, or native script ("தமிழ்நாடு", "महाराष्ट्र").
+  - `null` and `<NULL>` placeholders, zero-padded house numbers ("004",
+    "002662"), unit markers ("Unit", "#", "PMB", "H.no", "Door No").
+  - "City" and "Township" suffixes, renamed cities (Bangalore/Bengaluru).
+  - House-number typos, and empty addresses.
+- **Test.** Adds France (Bordeaux area), which is absent from train.
 
-`src/ber/blocking/`. Several complementary blockers run, and their union is
-capped:
+### 2.2 Solution Strategy
 
-| Blocker | Signal | Why |
-|---|---|---|
-| `name_char` | char 2-4-gram TF-IDF on the core name, top-30 cosine | typos, transliteration, suffix drift |
-| `addr_char` | char 2-4-gram TF-IDF on the core address, top-30 | same business, renamed or with an alias |
-| `full_word` | word 1-2-gram TF-IDF on name + address, top-20 | word-order swaps, partial overlap |
-| `postal_name` | same postal code and same first two letters of the name | cheap, high precision |
-| `acronym` | acronym of one name equals the other name | IBM ↔ International Business Machines |
-| `emb` (optional) | multilingual sentence embeddings, top-20 | semantic variants; off by default |
+**Approach Type:** Blocking + GBDT classifier + stacked GBDT, with an
+exclusive, metric-tuned decision.
 
-- TF-IDF is fit without labels on the records being matched. Top-k search is
-  exact, over sparse vectors in memory-bounded dense chunks.
-- Search is **partitioned by country**: an S1 record sees pool records with the
-  same country label or no label. TODO(data): the audit's same-country rate
-  for true pairs confirms this.
-- The union is ranked by `0.6 · name cosine + 0.4 · address cosine +
-  0.05 · number of blockers that proposed the pair`, then capped at
-  **50 candidates per S1 entity**. The capped set is exactly what the matcher
-  scores and what `candidate_pairs.tsv` reports.
-- Every run reports per-blocker recall, recall before and after the cap, and
-  the **oracle F0.5**, the score a perfect matcher would reach on these
-  candidates. That number is the ceiling blocking imposes.
+**Core innovation:** candidate generation that stays exact while scaling, and
+context-aware stacking.
 
-## 4. Features
+- Each query searches name and address inverted indexes on its **rarest
+  tokens up to a document-frequency budget** (prefix filtering). One pair of
+  sparse products yields top-m by name, by address and by their weighted sum.
+- Every generated pair is then **re-scored with the full (unfiltered)
+  cosines** before selection. Pruned tokens therefore limit only which pairs
+  are generated, never how they are ranked.
+- A reverse search from each Source 2/3 record adds its best Source 1 suitor.
+- Stage 2 reads the stage-1 probability in the context of its group. It asks
+  whether this is the entity's best candidate and the record's best suitor,
+  and by what margin. That is the question exclusivity asks.
 
-`src/ber/features.py` (76 features). Each one compares two records or
-places a pair among its competitors. **No feature encodes which country or
-source a record comes from**, so the model transfers to France.
+---
 
-- **Name similarity** on the core name: Levenshtein ratio, partial ratio,
-  token-sort and token-set ratios, Jaro-Winkler, normalised Levenshtein;
-  token-set on the full cleaned name; skeleton similarity; token Jaccard and
-  IDF-weighted Jaccard (rare shared tokens count more); first-token equality;
-  acronym match; length ratio; best similarity through DBA aliases;
-  legal-form match or conflict; conflict between numbers in names.
-- **Address similarity**: the same string measures on the core address plus
-  token-set on the full address; postal code match, conflict or missing;
-  house/unit-number Jaccard, first-number equality and number conflict;
-  landmark presence and landmark similarity; missing-address flag.
-- **Whole record**: token-set on name + address; same country (NaN when
-  either is unknown); whether the candidate is from S3.
-- **Blocking evidence**: each blocker's cosine, hit flags, number of blockers,
-  cap score and rank.
-- **Competition features**, computed on both sides of the pair for cap score,
-  name, address and whole-record similarity:
-  - within the S1 entity's candidates: rank, gap to the best, margin over the
-    runner-up
-  - within the S2/S3 record's suitors: the same three
+## 3. Candidate Generation (Blocking)
 
-  These encode whether this S1 entity is the best explanation for the pool
-  record, which suits a deduplicated reference source.
+- **Views.** Tokens are hashed, and IDF is fitted without labels on both sides
+  of the split.
+  - *Name:* core-name words, consonant-key codes, the squashed name, and
+    character 4-grams of the squashed name.
+  - *Address:* canonical address words and adjacent-word bigrams.
 
-## 5. Matcher
+  The consonant key is a phonetic code robust to romanisation: "painiar" and
+  "pioneer" both give `pnr`, and "sophtveyr" and "software" both give `sftvr`.
+  The squashed name catches names like "dentalcare" and "pinktraders". The
+  4-grams catch typos. Bigrams are rare where both of their words are common.
+- **Search.** Exact inverted-index top-m through sparse matrix products,
+  within each country (records with no label see every country). For each
+  query, the rarest tokens are searched until their summed document frequency
+  reaches 8,000, and tokens with pool df > 5,000 are never searched on. The
+  name index gives top-50, the address index top-50, and their weighted sum
+  (0.36 name + 0.64 address) top-100. The reverse direction (each Source 2/3
+  record against the Source 1 index) gives top-5.
+- **Re-score and select.** Every generated pair gets its full name, address
+  and combined cosines. Kept per Source 1 entity: the top-20 by combined, top-8
+  by name and top-8 by address; plus each Source 2/3 record's single best
+  Source 1 suitor. The union is exactly what the matcher scores and what
+  `candidate_pairs.tsv` lists.
+- **Candidate pairs generated:** TODO(run) on test; TODO(run) per Source 1 entity.
+- **How true matches were not lost:**
+  - Name-only, address-only and combined searches, so a record with an empty
+    address or a native-script name is still found through its other view.
+  - Full re-scoring, so tokens excluded from the search still count in the
+    ranking.
+  - The reverse search.
+  - Measured on train: generation recall TODO(run), candidate-set pair recall
+    TODO(run), and the macro F0.5 a perfect matcher would reach on these
+    candidates (oracle) TODO(run). With the pruned-only ranking we started
+    from, recall@100 was 0.85.
 
-`src/ber/matcher.py`. A LightGBM binary classifier (MIT licence, well under
-the 8B-parameter cap) scores every candidate pair.
+---
 
-- **Grouped cross-fitting**: 5 folds, with all candidates of a Source 1 entity
-  in one fold. Every pair gets an out-of-fold probability from a model that
-  never saw that entity's labels. Early stopping runs per fold.
-- The final model is refit on all training pairs for the mean best iteration
-  × 1.1.
-- TODO(data): hyper-parameters and feature importance, from
-  `runs/<run>/feature_importance.tsv`.
+## 4. Matching Model
 
-## 6. Decision layer
+**Features used (stage 1, 70+).**
 
-`src/ber/decision.py`.
+- *Name:*
+  - Levenshtein ratio, token-set, token-sort and partial ratios, Jaro-Winkler.
+  - Consonant-key ratio and token-set ratio.
+  - Squashed-name ratio and partial ratio.
+  - Best similarity through a former or trade name.
+  - Legal-form match, conflict or missing (bitmask).
+  - Name lengths; native-script, domain/hashtag and name-marker flags.
+- *Address:*
+  - Ratio, token-set, token-sort and partial ratios; landmark similarity.
+  - House-number equality; number-set Jaccard, shared count and conflict.
+  - Postal-code equality; address lengths.
+- *Vector:* TF-IDF cosine of the name view, the address view and their
+  combination.
+- *Group context:* for each of those cosines, the pair's rank, gap to the best
+  and margin over the runner-up among the entity's candidates and among the
+  record's suitors, plus both group sizes.
+- *Other:* whether the candidate comes from Source 3. No feature encodes a
+  country, so the model applies unchanged to France.
 
-1. **Exclusive assignment.** Source 1 is deduplicated, so each S2/S3 record
-   is kept only by its highest-scoring S1 suitor. TODO(data): the audit
-   confirms that no S2/S3 id appears under two S1 entities in train.
-2. **Operating point.** Either a probability threshold τ, or a per-entity
-   expected-F rule. The expected-F rule keeps the top-j candidates that
-   maximise estimated expected F0.5 and keeps none when P(no match) is
-   higher; this protects singletons.
-3. The single scalar is chosen by grid search on out-of-fold probabilities,
-   scored with the **exact leaderboard formula**. That scoring includes true
-   matches that blocking missed, so the tuning target is the real score and
-   not a candidate-only proxy.
+**Model type:**
+- Stage 1: LightGBM (MIT licence) on the candidates of 250,000 randomly
+  sampled training entities, with 4 folds grouped by entity. Every sampled pair
+  gets an out-of-fold probability. Every other training pair is scored by the
+  fold average, from models that never saw its entity.
+- Stage 2 (stacking): LightGBM over the stage-1 probability and its
+  entity-side and record-side rank, gap, margin, remaining mass and group size,
+  plus ten stage-1 similarities. Folds are the same.
+- No pretrained language model is used. The whole solution runs on CPU.
 
-## 7. Validation protocol
+**Threshold selection method:**
+- Exclusive assignment first: a Source 2/3 record is kept only by its
+  highest-probability Source 1 suitor.
+- Then one probability threshold, chosen by grid search to maximise the
+  **exact leaderboard macro F0.5** on the sampled entities' out-of-fold
+  predictions. Singletons are included, and true matches that blocking missed
+  count against recall.
+- The threshold is then reported on the roughly 1.95M held-out training
+  entities, whose predictions come from models that never saw them.
 
-- Out-of-fold scoring over all train S1 entities mirrors the test setting: one
-  model, every S1 entity, the full S2/S3 pool.
-- Every run writes `runs/<timestamp>-<tag>/` with the config, metrics (overall,
-  per country, per true-match cardinality, blocking), the decision curve,
-  feature importance, and side-by-side false-positive and false-negative
-  tables. False negatives are labelled *missed by blocking* or *rejected by
-  matcher*.
-- A synthetic generator (`ber synth`) reproduces the file format and the noise
-  patterns, with France only in test. It exercises the whole pipeline in the
-  test suite. Synthetic scores only show that the pipeline works; they do not
-  predict leaderboard results.
+---
 
-## 8. Rule compliance
+## 5. Results & Error Analysis
 
-- **No external data.** No API, registry, geocoder or web source is used.
-  `tests/test_fair_play.py` holds the pipeline to an import allowlist: the
-  standard library without its networking modules, plus the pinned
-  dependencies. Anything else fails the build.
-- **Model licence and size.** LightGBM is MIT. Optional encoders must be in
-  `ber.pretrained.REGISTRY` (MIT or Apache-2.0, ≤ 8B parameters) and are
-  loaded offline from local files.
-- **Open country set.** There is no country one-hot or filter. France is
-  normalised, blocked and matched like any other country.
-- **Reproducibility.** Requirements are pinned, seeds fixed, LightGBM runs in
-  deterministic mode, and one command regenerates both outputs
-  (`code/business_entity_resolution/README.md`).
+- **F_0.5 score (macro):**
+  - held-out training entities: TODO(run)
+  - sampled entities (out-of-fold): TODO(run)
+  - public leaderboard: TODO(lb)
+- **By country (train):** TODO(run).
+- **Common false positives (wrong merges):** TODO(run), from
+  `runs/<run>/errors_false_positive.tsv`.
+- **Common false negatives (missed matches):** TODO(run), from
+  `runs/<run>/errors_false_negative.tsv`.
 
-## 9. What we tried
+---
 
-TODO(data): ablations (each blocker, feature group, exclusive on/off,
-threshold versus expected-F, cap size) with out-of-fold F0.5, from the
-`runs/` records.
+## 6. Conclusion
+
+TODO(run)
+
+---
+
+## Appendix
+
+### A. Code Artefacts
+
+`code/business_entity_resolution/`:
+
+- `src/main.py`: entry point. `python src/main.py run --data-dir <dataset> --out-dir output`
+  regenerates both output files from the raw TSVs.
+- `src/ber/table.py`, `src/ber/normalize/`: parallel normalisation into
+  compact tables.
+- `src/ber/vectorize.py`, `src/ber/blocking/multiview.py`: hashed TF-IDF views,
+  prefix filtering, per-country inverted-index search.
+- `src/ber/scale.py`: candidate generation, re-scoring and selection, stage 1
+  and stage 2 training, tuning, prediction.
+- `src/ber/pairfeat.py`: vectorised pair and group-context features.
+- `src/ber/decision.py`, `src/ber/metrics.py`: exclusive decision and the
+  exact metric.
+- `src/ber/submission.py`: writer and validator.
+- `src/ber/configs/default.yaml`: every setting. The run used
+  `configs/full.yaml` (reproduced in the README).
+
+### B. Additional Results
+
+Blocking recall at different generation budgets and selection sizes (20,000
+sampled training entities, forward search only):
+
+| Query budget (Σdf) | Generated recall | k 10/5/5 | k 15/6/6 | k 20/8/8 | k 30/10/10 |
+|---|---|---|---|---|---|
+| 3,000 | 0.963 | 0.941 (12/entity) | 0.948 (18) | 0.952 (24) | 0.955 (34) |
+| 8,000 | 0.968 | 0.944 (12) | 0.951 (18) | 0.956 (24) | 0.959 (34) |
+
+Earlier designs on the same sample:
+- rare-token ranking only: recall@100 of 0.77 (df ≤ 2,000) and 0.85 (df ≤ 5,000)
+- combined-view generation with re-scoring: recall@30 of 0.878 (df ≤ 5,000)
+  and 0.934 (df ≤ 20,000, four times slower)

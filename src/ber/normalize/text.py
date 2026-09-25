@@ -104,3 +104,47 @@ def skeleton(token: str) -> str:
     if len(out) > 3 and out.endswith(("a", "e", "h")):
         out = out[:-1]
     return out
+
+
+# Consonant key: a coarser phonetic code that survives romanisation of Indic
+# scripts, where vowels are the least stable part. "painiar" and "pioneer" both
+# give "pnr", "sophtveyr" and "software" give "sftvr", "imdstrij" and
+# "industries" give "indstrs".
+_KEY_RULES = [
+    ("ph", "f"), ("bh", "b"), ("kh", "k"), ("gh", "g"), ("dh", "d"), ("th", "t"),
+    ("sh", "s"), ("ch", "k"), ("ck", "k"), ("c", "k"), ("q", "k"), ("x", "ks"),
+    ("z", "j"), ("w", "v"), ("y", "i"),
+]  # fmt: skip
+# anyascii writes the anusvara as "m" before a consonant ("imdstrij", "marketimg");
+# only the velar/palatal/dental-stop cases are rewritten, "limtid" keeps its m.
+_NASAL = re.compile(r"m(?=[dgkj])")
+_VOWELS = re.compile(r"[aeiou]")
+
+
+@lru_cache(maxsize=2_000_000)
+def consonant_key(token: str) -> str:
+    if not token or not token.isalpha():
+        return token
+    out = token
+    for src, dst in _KEY_RULES:
+        out = out.replace(src, dst)
+    out = _NASAL.sub("n", out)
+    out = out[0] + _VOWELS.sub("", out[1:])
+    out = _REPEAT.sub(r"\1", out)
+    if len(out) > 2 and out.endswith("j"):
+        out = out[:-1] + "s"
+    return out
+
+
+_LEET = str.maketrans(
+    {"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "6": "g", "7": "t", "8": "b", "9": "g"}
+)
+_HAS_DIGIT = re.compile(r"\d")
+_HAS_ALPHA = re.compile(r"[a-z]")
+
+
+def deleet(token: str) -> str:
+    """Undo digit-for-letter typos inside words ("g1obal", "6lobal"); leave real numbers."""
+    if _HAS_DIGIT.search(token) and len(_HAS_ALPHA.findall(token)) >= 2:
+        return token.translate(_LEET)
+    return token

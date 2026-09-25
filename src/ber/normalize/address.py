@@ -33,6 +33,16 @@ _PHRASES = compile_phrases(
         ("po box", "pobox"),
         ("post box", "pobox"),
         ("boite postale", "pobox"),
+        ("h no", ""),
+        ("door no", ""),
+        ("house no", ""),
+        ("s o", ""),  # "S/O" (son of) in Indian addresses
+        ("d o", ""),
+        ("w o", ""),
+    ]
+)
+_US_PHRASES = compile_phrases(
+    [
         ("new york", "ny"),
         ("new jersey", "nj"),
         ("new mexico", "nm"),
@@ -46,6 +56,31 @@ _PHRASES = compile_phrases(
         ("district of columbia", "dc"),
     ]
 )
+# Indian states: English name, postal code, and the romanisation anyascii gives
+# for the state written in its own script (महाराष्ट्र -> "mharastr").
+_INDIA_PHRASES = compile_phrases(
+    [
+        ("uttar pradesh", "up"), ("uttr prdes", "up"), ("madhya pradesh", "mp"),
+        ("mdhy prdes", "mp"), ("andhra pradesh", "ap"), ("amdhr prdes", "ap"),
+        ("himachal pradesh", "hp"), ("arunachal pradesh", "arp"), ("tamil nadu", "tn"),
+        ("west bengal", "wb"), ("jammu and kashmir", "jk"), ("jammu kashmir", "jk"),
+        ("nct of delhi", "dl"), ("dadra and nagar haveli", "dnh"),
+    ]
+)  # fmt: skip
+INDIA_STATES: dict[str, str] = {
+    "maharashtra": "mh", "mharastr": "mh", "mh": "mh", "delhi": "dl", "dilli": "dl",
+    "dl": "dl", "up": "up", "karnataka": "ka", "krnatk": "ka", "ka": "ka", "tamilnadu": "tn",
+    "tmilnatu": "tn", "tn": "tn", "gujarat": "gj", "gujrat": "gj", "gj": "gj",
+    "pscimbng": "wb", "wb": "wb", "telangana": "tg", "telmgan": "tg", "tg": "tg", "ts": "tg",
+    "haryana": "hr", "hriyana": "hr", "hr": "hr", "rajasthan": "rj", "rajsthan": "rj",
+    "rj": "rj", "kerala": "kl", "kerlm": "kl", "kl": "kl", "bihar": "br", "br": "br",
+    "mp": "mp", "amdhrprdes": "ap", "ap": "ap", "punjab": "pb", "pmjab": "pb", "pb": "pb",
+    "odisha": "od", "orissa": "od", "odisa": "od", "od": "od", "jharkhand": "jh",
+    "jh": "jh", "chhattisgarh": "cg", "cg": "cg", "uttarakhand": "uk", "uttaranchal": "uk",
+    "uk": "uk", "hp": "hp", "goa": "ga", "ga": "ga", "jk": "jk", "chandigarh": "chd",
+    "puducherry": "py", "pondicherry": "py", "py": "py", "assam": "asm", "tripura": "tr",
+    "meghalaya": "ml", "manipur": "mn", "nagaland": "nl", "mizoram": "mz", "sikkim": "sk",
+}  # fmt: skip
 
 STREET_FORMS: dict[str, str] = {
     # English
@@ -119,8 +154,18 @@ CITY_FORMS: dict[str, str] = {
 }  # fmt: skip
 
 LANDMARK_WORDS = frozenset({"near", "opp", "behind", "derriere"})
-DROP = frozenset({"no", "num", "number", "nos"})
-_TOKEN_MAP = {**STREET_FORMS, **US_STATES, **CITY_FORMS}
+# "null"/"<NULL>" placeholders, unit markers whose number is what matters, and
+# "City"/"Township" suffixes that come and go on the same place name.
+DROP = frozenset(
+    {"no", "num", "number", "nos", "null", "unit", "pmb", "city", "township", "twp", "none"}
+)
+_BASE_MAP = {**STREET_FORMS, **CITY_FORMS}
+_MAPS = {
+    "united states": ({**_BASE_MAP, **US_STATES}, _US_PHRASES),
+    "india": ({**_BASE_MAP, **INDIA_STATES}, _INDIA_PHRASES),
+}
+_DEFAULT_MAP = ({**STREET_FORMS, **US_STATES, **CITY_FORMS}, _US_PHRASES)
+_BASE_ONLY = (_BASE_MAP, [])
 
 
 @dataclass(frozen=True)
@@ -129,7 +174,8 @@ class NormalizedAddress:
     core: str  # without landmark phrases and postal codes
     landmark: str  # landmark phrases ("near sbi atm"), if any
     postal: str  # postal codes found, sorted, space separated
-    numbers: str  # other numbers (house, unit, street), sorted unique
+    numbers: str  # other numbers (house, unit, street), sorted unique, leading zeros stripped
+    first: str = ""  # first number in reading order: usually the house number
 
 
 def extract_postal_codes(raw: str) -> list[str]:
@@ -143,10 +189,18 @@ def extract_postal_codes(raw: str) -> list[str]:
     return [m.group(1) for m in _POSTAL.finditer(text) if m.start(1) != skip_at]
 
 
+def _strip_zeros(token: str) -> str:
+    return (token.lstrip("0") or "0") if token.isdigit() else token
+
+
 @lru_cache(maxsize=1_000_000)
-def normalize_address(raw: str, transliterate: bool = True) -> NormalizedAddress:
+def normalize_address(raw: str, transliterate: bool = True, country: str = "") -> NormalizedAddress:
+    """Normalise one address. ``country`` is a normalised label; it selects state maps only."""
     if not raw:
         return NormalizedAddress("", "", "", "", "")
+    # No label: the historical default (US states). A known label: its own map.
+    # Any other label (France, or a country never seen): street forms only.
+    token_map, country_phrases = _MAPS.get(country, _DEFAULT_MAP if not country else _BASE_ONLY)
     postal = sorted(set(extract_postal_codes(raw)))
     postal_set = set(postal)
 
@@ -155,7 +209,9 @@ def normalize_address(raw: str, transliterate: bool = True) -> NormalizedAddress
     landmark_tokens: list[str] = []
     for segment in _SEGMENT_SPLIT.split(_PIN_SPACED.sub(r"\1\2", raw)):
         text = replace_phrases(clean(segment, transliterate), _PHRASES)
-        tokens = canonical_tokens(text.split(), _TOKEN_MAP, DROP)
+        text = replace_phrases(text, country_phrases)
+        tokens = canonical_tokens(text.split(), token_map, DROP)
+        tokens = [t if t in postal_set else _strip_zeros(t) for t in tokens]
         if not tokens:
             continue
         all_tokens.extend(tokens)
@@ -165,15 +221,15 @@ def normalize_address(raw: str, transliterate: bool = True) -> NormalizedAddress
         landmark_tokens.extend(landmark)
 
     core = " ".join(core_tokens)
-    numbers = sorted(
-        {n for n in _DIGITS.findall(core) if n not in postal_set}, key=lambda n: (len(n), n)
-    )
+    in_order = [n for n in _DIGITS.findall(core) if n not in postal_set]
+    numbers = sorted(set(in_order), key=lambda n: (len(n), n))
     return NormalizedAddress(
         clean=" ".join(all_tokens),
         core=core,
         landmark=" ".join(landmark_tokens),
         postal=" ".join(postal),
         numbers=" ".join(numbers),
+        first=in_order[0] if in_order else "",
     )
 
 

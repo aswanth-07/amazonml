@@ -44,8 +44,9 @@ def test_invalid_config_is_rejected(override):
 
 @pytest.mark.parametrize(
     "path",
-    sorted((Path(__file__).resolve().parents[1] / "configs").glob("*.yaml")),
-    ids=lambda p: p.name,
+    sorted((Path(__file__).resolve().parents[1] / "configs").glob("*.yaml"))
+    + sorted((Path(__file__).resolve().parents[1] / "src" / "ber" / "configs").glob("*.yaml")),
+    ids=lambda p: f"{p.parent.name}/{p.name}",
 )
 def test_shipped_experiment_configs_load(path):
     load_config(path)

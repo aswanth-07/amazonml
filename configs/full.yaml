@@ -1,0 +1,24 @@
+# Full-data run on the challenge dataset (2.2M S1 x 10.3M S2/S3 per split).
+# ber run --config configs/full.yaml --data-dir student_resource/dataset --out-dir output
+model:
+  n_folds: 4
+  num_boost_round: 3000
+  early_stopping_rounds: 60
+  params:
+    objective: binary
+    learning_rate: 0.08
+    num_leaves: 127
+    min_data_in_leaf: 200
+    feature_fraction: 0.7
+    bagging_fraction: 0.7
+    bagging_freq: 1
+    lambda_l2: 1.0
+    max_bin: 127
+    verbosity: -1
+scale:
+  query_budget: 8000
+  train_sample: 250000
+  n_threads: 20
+  n_jobs: 12
+  chunk_rows: 500
+  feature_chunk: 2000000

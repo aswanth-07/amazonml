@@ -126,6 +126,37 @@ class DecisionConfig:
 
 
 @dataclass
+class ScaleConfig:
+    """The large-scale path (``ber run``): inverted-index blocking, sampled training, stacking."""
+
+    k: int = 20  # kept per Source 1 entity by combined cosine after re-scoring
+    k_name: int = 8  # ... plus its best by name cosine
+    k_addr: int = 8  # ... plus its best by address cosine
+    k_reverse: int = 1  # ... plus each pool record's best Source 1 suitors
+    generate: int = 100  # wide first pass per Source 1 query, combined view (rare tokens only)
+    generate_name: int = 50  # wide first pass, name view
+    generate_addr: int = 50  # wide first pass, address view
+    generate_reverse: int = 5  # wide first pass per pool query (reverse direction); 0 disables
+    name_weight: float = (
+        0.6  # weight of the name view in the blocking vector (address gets sqrt(1-w^2))
+    )
+    df_cap: int = 5000  # query tokens more frequent than this in the pool are not searched on
+    query_budget: int = (
+        6000  # prefix filter: search on a query's rarest tokens up to this summed df; 0 = off
+    )
+    n_threads: int = 16
+    n_jobs: int = 12
+    chunk_rows: int = 500
+    block_chunk: int = (
+        200_000  # S1 queries searched, re-scored and selected per pass (bounds memory)
+    )
+    train_sample: int = 300_000  # Source 1 entities whose candidates train the matcher
+    feature_chunk: int = 2_000_000
+    stage2: bool = True
+    cache_dir: str = "artifacts/cache"
+
+
+@dataclass
 class Config:
     seed: int = 42
     beta: float = 0.5
@@ -137,6 +168,7 @@ class Config:
     blocking: BlockingConfig = field(default_factory=BlockingConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
+    scale: ScaleConfig = field(default_factory=ScaleConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(asdict(self))
