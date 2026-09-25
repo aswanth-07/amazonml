@@ -358,6 +358,30 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
     assert {"ce", "ce_rank_s1", "ce_gap_s1", "ce_margin_s1"} <= set(names)
 
 
+def test_detail_features_tell_neighbours_from_typos():
+    from ber.pairfeat import detail_features
+    from ber.table import build_table
+
+    def table(rows, source):
+        df = pd.DataFrame(
+            rows, columns=["entity_id", "business_name", "business_address", "country"]
+        )
+        return build_table(df, source, True, n_jobs=1)
+
+    s1 = table([("S1-1", "Howard", "450 Mass Ave, Washington, DC", "US"),
+                ("S1-2", "WPQ Realtors", "12 Main St, Pune", "India")], 1)  # fmt: skip
+    pool = table([("S2-1", "Howard", "471 Mass Ave, Washington, DC", "US"),
+                  ("S2-2", "Howard", "45 Mass Ave, Washington, DC", "US"),
+                  ("S2-3", "RPQ Realtors", "12 Main St, Pune", "India")], 2)  # fmt: skip
+    f = detail_features(s1, pool, np.array([0, 0, 1]), np.array([0, 1, 2]))
+    assert f["first_num_logdiff"][0] == pytest.approx(np.log1p(21))
+    assert f["first_num_prefix"][1] == 1.0  # 45 is a truncation of 450
+    assert np.isnan(f["first_num_prefix"][[0, 2]]).all()  # same length: not applicable
+    assert f["first_num_edit"][:3].tolist() == [2.0, 1.0, 0.0]
+    assert f["name_short_tok_diff"].tolist() == [0.0, 0.0, 1.0]
+    assert f["name_extra_tok_s1"][2] == 1 and f["name_extra_tok_pool"][2] == 1
+
+
 def test_coherence_partner_is_the_best_other_candidate():
     from ber.scale import coherence_columns
 

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from rapidfuzz import fuzz
-from rapidfuzz.distance import JaroWinkler
+from rapidfuzz.distance import JaroWinkler, Levenshtein
 from rapidfuzz.process import cpdist
 
 from ber.table import Table
@@ -144,6 +144,53 @@ def string_features(
     f["pool_styled"] = ((fl_b & 2) > 0).astype(np.float32)
     f["pool_marker"] = ((fl_b & 4) > 0).astype(np.float32)
     f["pool_is_s3"] = (pool.source[cols] == 3).astype(np.float32)
+    return f
+
+
+def _digits(x: np.ndarray) -> np.ndarray:
+    return np.where(x > 0, np.floor(np.log10(np.maximum(x, 1))) + 1, 1).astype(np.int64)
+
+
+def detail_features(
+    s1: Table, pool: Table, rows: np.ndarray, cols: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Fine differences that separate a business from its neighbour or namesake.
+
+    Wrong merges on train are mostly the same name at a nearby house number
+    ("450 ma ave" vs "471 ma ave", "1015" vs "1018") or a name one short token
+    apart ("wpq realtors" vs "rpq realtors"). Equality alone cannot tell a typo
+    from a neighbour: how far apart, and whether one number is a truncation of
+    the other, can.
+    """
+    fa, fb = s1.first_num[rows], pool.first_num[cols]
+    both = (fa >= 0) & (fb >= 0)
+    f: dict[str, np.ndarray] = {}
+    diff = np.abs(fa - fb).astype(np.float64)
+    f["first_num_logdiff"] = np.where(both, np.log1p(diff), np.nan).astype(np.float32)
+    da, db = _digits(fa), _digits(fb)
+    shift = np.abs(da - db)
+    longer, shorter = np.where(da >= db, fa, fb), np.where(da >= db, fb, fa)
+    prefix = (longer // np.power(10, np.minimum(shift, 18))) == shorter
+    f["first_num_prefix"] = np.where(both & (shift > 0), prefix, np.nan).astype(np.float32)
+    f["first_num_digits_diff"] = np.where(both, shift, np.nan).astype(np.float32)
+    sa = np.where(both, fa, 0).astype(str).astype(object)
+    sb = np.where(both, fb, 0).astype(str).astype(object)
+    edit = cpdist(sa, sb, scorer=Levenshtein.distance, workers=-1, dtype=np.int32)
+    f["first_num_edit"] = np.where(both, edit, np.nan).astype(np.float32)
+
+    n = len(rows)
+    extra_a = np.empty(n, np.float32)
+    extra_b = np.empty(n, np.float32)
+    short = np.empty(n, np.float32)
+    for i, (a, b) in enumerate(zip(s1.name[rows], pool.name[cols])):
+        ta, tb = set(a.split()), set(b.split())
+        xa, xb = ta - tb, tb - ta
+        extra_a[i] = len(xa)
+        extra_b[i] = len(xb)
+        short[i] = any(len(t) <= 3 for t in xa) or any(len(t) <= 3 for t in xb)
+    f["name_extra_tok_s1"] = extra_a
+    f["name_extra_tok_pool"] = extra_b
+    f["name_short_tok_diff"] = short
     return f
 
 

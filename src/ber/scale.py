@@ -47,7 +47,13 @@ from ber.metrics import (
     macro_fbeta,
     precision_recall,
 )
-from ber.pairfeat import group_features, group_stats, number_features, string_features
+from ber.pairfeat import (
+    detail_features,
+    group_features,
+    group_stats,
+    number_features,
+    string_features,
+)
 from ber.submission import validate_outputs, write_outputs
 from ber.table import Table, build_table, release_workers
 from ber.utils import git_revision, seed_everything, timed
@@ -81,7 +87,7 @@ STAGE2_KEEP = (
 
 
 BLOCKING_VERSION = 1  # bump when tokens, weighting or search change which pairs blocking returns
-FEATURE_VERSION = 1  # bump when the stage-1 pair features change
+FEATURE_VERSION = 2  # bump when the stage-1 pair features change
 
 
 # ----------------------------------------------------------------------------- tables
@@ -382,6 +388,7 @@ def intrinsic_features(sd: SplitData, idx: np.ndarray) -> dict[str, np.ndarray]:
     rows, cols = sd.rows[idx], sd.cols[idx]
     out = string_features(sd.s1, sd.pool, rows, cols)
     out.update(number_features(sd.num_q, sd.num_d, rows, cols))
+    out.update(detail_features(sd.s1, sd.pool, rows, cols))
     return out
 
 
