@@ -4,6 +4,10 @@ Match business records from three noisy sources. For every Source 1 entity,
 find all Source 2 and Source 3 records that describe the same real-world
 business. Scoring is macro F0.5 per Source 1 entity, singletons included.
 
+**Team members and their agents: start with [TEAM_HANDBOOK.md](TEAM_HANDBOOK.md)**.
+It has the current scores, how to run each version, what the data taught us, and
+the open directions to branch on.
+
 The full brief, condensed, with the file where each rule is enforced:
 [docs/problem_statement.md](docs/problem_statement.md). The methodology draft,
 which becomes the submitted `Documentation_template.md`:
