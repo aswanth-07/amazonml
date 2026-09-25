@@ -598,6 +598,20 @@ class TrainedModel:
     threshold: float
     config: dict[str, Any]
     version: str = __version__
+    decision: dict[str, Any] | None = None  # tuned rule (ber.tuning); None: plain threshold
+
+    def rule(self):
+        from ber.tuning import Rule
+
+        if self.decision is None:
+            return Rule("threshold", {"t": self.threshold})
+        return Rule(self.decision["strategy"], self.decision["params"])
+
+
+def decide(rows: np.ndarray, adj: np.ndarray, rule, beta: float) -> np.ndarray:
+    from ber.tuning import Grouped, select
+
+    return select(Grouped.build(rows, adj), rule, beta)
 
 
 def _chunks(n: int, size: int):
@@ -759,13 +773,24 @@ def run(
             stage2, s2_names = [], []
         _write_json(run_dir / "metrics.json", summary)
 
-    _report_train(sd, final_p, thr, truth, cfg, run_dir, summary, eligible)
+    # ---- decision rule: tuned on the sample's out-of-fold probabilities, reported on holdout
+    from ber.tuning import tune
+
+    with timed("train: decision rules"):
+        rule, summary["decision"] = tune(
+            sd.rows, adjusted(sd, final_p, cfg), labels, n_true, sample, holdout, cfg.beta
+        )
+    _write_json(run_dir / "metrics.json", summary)
+    _report_train(sd, final_p, rule, truth, cfg, run_dir, summary, eligible)
     # every pair's final probability, for tuning decision rules offline
     np.savez(
         run_dir / "train_scores.npz", rows=sd.rows, cols=sd.cols, p=final_p, labels=labels,
         n_true=n_true, eligible=eligible, in_sample=in_sample,
     )  # fmt: skip
-    model = TrainedModel(stage1, stage2, feature_names, s2_names, thr, cfg.to_dict())
+    model = TrainedModel(
+        stage1, stage2, feature_names, s2_names, thr, cfg.to_dict(),
+        decision={"strategy": rule.strategy, "params": rule.params},
+    )  # fmt: skip
     Path(cfg.artifacts_dir).mkdir(parents=True, exist_ok=True)
     joblib.dump(model, Path(cfg.artifacts_dir) / "scale_model.joblib")
     joblib.dump(model, run_dir / "scale_model.joblib")
@@ -815,9 +840,9 @@ def blocking_recall(
     return {"pair_recall": float(lab.sum() / total), "oracle_fbeta": oracle_f, **recall_at}
 
 
-def _report_train(sd, probs, thr, truth, cfg, run_dir: Path, summary: dict, eligible) -> None:
+def _report_train(sd, probs, rule, truth, cfg, run_dir: Path, summary: dict, eligible) -> None:
     adj = adjusted(sd, probs, cfg)
-    mask = (adj >= thr) & (adj > 0)
+    mask = decide(sd.rows, adj, rule, cfg.beta)
     pred = id_lists(sd.rows[mask], sd.cols[mask], adj[mask], sd.s1.ids, sd.pool.ids)
     keep_ids = set(sd.s1.ids[eligible].tolist())
     truth = {k: v for k, v in truth.items() if k in keep_ids}
@@ -904,7 +929,7 @@ def predict_split(
         np.savez(Path(save_to) / f"{split}_scores.npz", rows=sd.rows, cols=sd.cols, p=probs,
                  s1_ids=sd.s1.ids.astype("U"), pool_ids=sd.pool.ids.astype("U"))  # fmt: skip
     adj = adjusted(sd, probs, cfg)
-    mask = (adj >= model.threshold) & (adj > 0)
+    mask = decide(sd.rows, adj, model.rule(), cfg.beta)
     matches = id_lists(sd.rows[mask], sd.cols[mask], adj[mask], sd.s1.ids, sd.pool.ids)
     candidates = id_lists(sd.rows, sd.cols, sd.base["score"], sd.s1.ids, sd.pool.ids)
     s1_ids = list(sd.s1.ids)
