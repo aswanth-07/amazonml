@@ -56,7 +56,7 @@ def _model(init: str | Path, head: Path | None = None):
             h = h.last_hidden_state
             m = attention_mask.unsqueeze(-1).to(h.dtype)
             v = (h * m).sum(1) / m.sum(1).clamp(min=1)
-            return self.head(v.float()).squeeze(-1)
+            return self.head(v.to(self.head.weight.dtype)).squeeze(-1)
 
     model = CrossEncoder()
     if head is not None:
