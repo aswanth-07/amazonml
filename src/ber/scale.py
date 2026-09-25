@@ -566,6 +566,24 @@ def _lgb_params(cfg: Config, seed: int) -> dict[str, Any]:
     }
 
 
+def reuse_folds(path: str | Path, x: pd.DataFrame, groups: np.ndarray, cfg: Config):
+    """Stage 1 from an earlier run's saved model instead of retraining: the same grouped
+    folds are rebuilt and each fold model predicts its own held-out part, which gives the
+    out-of-fold probabilities that training would have. Refused unless the saved model
+    used exactly these features and folds."""
+    saved = joblib.load(path)
+    if list(saved.feature_names) != list(x.columns) or len(saved.stage1) != cfg.model.n_folds:
+        raise ValueError(f"{path}: stage 1 was trained on other features or folds")
+    folds = group_folds(groups, cfg.model.n_folds, cfg.seed)
+    oof = np.zeros(len(x), dtype=np.float32)
+    for k, booster in enumerate(saved.stage1):
+        va = folds == k
+        with timed(f"stage1 fold {k + 1}: reuse and predict held-out part"):
+            oof[va] = booster.predict(x[va], num_iteration=booster.best_iteration)
+    log.info("reused stage 1 from %s", path)
+    return oof, list(saved.stage1), [int(b.best_iteration) for b in saved.stage1]
+
+
 def fit_folds(x: pd.DataFrame, y: np.ndarray, groups: np.ndarray, cfg: Config, tag: str):
     """Grouped K-fold LightGBM. Returns (out-of-fold probabilities, fold models, best iterations)."""
     import lightgbm as lgb
@@ -897,7 +915,10 @@ def run(
     with timed("train: sample features"):
         xs = pd.DataFrame(np.asarray(feats[sidx]), columns=feature_names)
     ys = labels[sidx].astype(np.int8)
-    oof1, stage1, iters1 = fit_folds(xs, ys, sd.rows[sidx], cfg, "stage1")
+    if cfg.scale.stage1_model:  # reuse a previous run's stage 1 (same features and sample)
+        oof1, stage1, iters1 = reuse_folds(cfg.scale.stage1_model, xs, sd.rows[sidx], cfg)
+    else:
+        oof1, stage1, iters1 = fit_folds(xs, ys, sd.rows[sidx], cfg, "stage1")
     del xs
     _feature_importance(stage1, feature_names).to_csv(
         run_dir / "feature_importance.tsv", sep="\t", index=False

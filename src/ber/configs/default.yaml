@@ -109,6 +109,7 @@ scale:                       # the large-scale path used by `ber run` / `ber cv`
   ce_python: py -3.13        # interpreter with torch + transformers that runs it
   ce_min_p1: 0.02            # cross-encoder scores pairs with stage-1 probability >= this
   ce_wait: 0                 # seconds to wait for a cross-encoder that is still training
+  stage1_model: ""           # a previous run's scale_model.joblib whose stage 1 is reused
 
 decision:
   strategy: threshold        # threshold | expected_f

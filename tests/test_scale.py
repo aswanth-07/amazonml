@@ -276,6 +276,27 @@ def test_new_feature_group_reuses_older_columns(synthetic_dir, tmp_path: Path, m
         assert (tmp_path / "warm" / name).read_bytes() == (tmp_path / "cold" / name).read_bytes()
 
 
+@pytest.mark.slow
+def test_reused_stage1_reproduces_the_run(synthetic_dir, tmp_path: Path):
+    from ber.scale import run
+
+    base = [
+        f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
+        f"runs_dir={(tmp_path / 'runs').as_posix()}",
+        f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
+        "scale.train_sample=250", "scale.n_jobs=1", "scale.n_threads=2",
+        "model.n_folds=3", "model.num_boost_round=100", "model.early_stopping_rounds=20",
+    ]  # fmt: skip
+    first = run(load_config(None, base), synthetic_dir, tmp_path / "a")
+    saved = (tmp_path / "artifacts" / "scale_model.joblib").as_posix()
+    again = run(
+        load_config(None, [*base, f"scale.stage1_model={saved}"]), synthetic_dir, tmp_path / "b"
+    )
+    assert again["stage1"]["sample_oof"] == first["stage1"]["sample_oof"]
+    for name in ("matching_results.tsv", "candidate_pairs.tsv"):
+        assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes()
+
+
 def _fake_embeddings(data_dir: Path, emb_dir: Path, k: int = 10, dim: int = 64) -> None:
     """Embeddings and kNN files in ber.embed's format, from hashed name trigrams (no torch)."""
     import zlib
