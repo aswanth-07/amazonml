@@ -65,14 +65,16 @@ def emb_paths(emb_dir: str | Path, split: str) -> dict[str, Path]:
 
 
 def load_embeddings(emb_dir: str | Path, split: str, s1_ids, pool_ids):
-    """(S1, pool) float16 embeddings aligned with the given id arrays."""
+    """(S1, pool) float16 embeddings aligned with the given id arrays. When the stored order
+    already matches they stay memory-mapped: file-backed pages the OS can drop under
+    pressure, rather than ~10 GB of committed memory."""
     p = emb_paths(emb_dir, split)
     out = []
     for key, ids in (("s1", s1_ids), ("pool", pool_ids)):
         stored = np.load(p[f"{key}_ids"])
         emb = np.load(p[key], mmap_mode="r")
         if len(stored) == len(ids) and np.array_equal(stored, np.asarray(ids, dtype=stored.dtype)):
-            out.append(np.asarray(emb))
+            out.append(emb)
         else:
             pos = pd.Index(stored).get_indexer(ids)
             if (pos < 0).any():
@@ -181,15 +183,30 @@ def _batches_by_length(texts: list[str], batch: int):
         yield order[s : s + batch]
 
 
-def encode(model_dir: str | Path, texts: list[str], batch: int = 2048, max_len: int = MAX_LEN):
-    """L2-normalised float16 embeddings, one row per text (length-sorted batches)."""
+def encode(
+    model_dir: str | Path,
+    texts: list[str],
+    batch: int = 2048,
+    max_len: int = MAX_LEN,
+    out_path: str | Path | None = None,
+):
+    """L2-normalised float16 embeddings, one row per text (length-sorted batches).
+
+    With ``out_path`` the rows go straight into a memory-mapped ``.npy`` on disk (so a
+    ten-million-row output never has to fit in memory), written under a temporary name
+    and renamed when complete."""
     import torch
     from transformers import AutoModel, AutoTokenizer
 
     dev = _device()
     tok = AutoTokenizer.from_pretrained(model_dir)
     model = AutoModel.from_pretrained(model_dir, dtype=torch.float16).to(dev).eval()
-    out = np.empty((len(texts), model.config.hidden_size), dtype=np.float16)
+    shape = (len(texts), model.config.hidden_size)
+    if out_path is not None:
+        tmp = Path(out_path).with_suffix(".partial.npy")
+        out = np.lib.format.open_memmap(tmp, "w+", np.float16, shape)
+    else:
+        out = np.empty(shape, dtype=np.float16)
     t0, done = time.time(), 0
     with torch.inference_mode():
         for idx in _batches_by_length(texts, batch):
@@ -201,6 +218,11 @@ def encode(model_dir: str | Path, texts: list[str], batch: int = 2048, max_len: 
             if done % (batch * 500) < batch:
                 log.info("encoded %d/%d (%.0f/s)", done, len(texts), done / (time.time() - t0))
     log.info("encoded %d texts in %.0fs", len(texts), time.time() - t0)
+    if out_path is not None:
+        out.flush()
+        del out
+        Path(tmp).replace(out_path)
+        return np.load(out_path, mmap_mode="r")
     return out
 
 
@@ -430,13 +452,12 @@ def run_split(data_dir, split: str, model_dir, emb_dir, k: int, k_reverse: int) 
     p = emb_paths(emb_dir, split)
     Path(emb_dir).mkdir(parents=True, exist_ok=True)
     s1, pool = load_frames(data_dir, split)
-    if not (p["s1"].exists() and p["pool"].exists()):
-        for key, df in (("s1", s1), ("pool", pool)):
-            e = encode(model_dir, record_texts(df))
-            np.save(p[key], e)
+    for key, df in (("s1", s1), ("pool", pool)):  # each side once: a rerun resumes
+        if not (p[key].exists() and p[f"{key}_ids"].exists()):
+            encode(model_dir, record_texts(df), out_path=p[key])
             np.save(p[f"{key}_ids"], df[schema.ENTITY_ID].to_numpy().astype("U"))
-    q = np.load(p["s1"])
-    d = np.load(p["pool"])
+    q = np.load(p["s1"], mmap_mode="r")
+    d = np.load(p["pool"], mmap_mode="r")
     qc, dc = countries(s1), countries(pool)
     t0 = time.time()
     fr, fc, fs = knn(q, d, qc, dc, k)
