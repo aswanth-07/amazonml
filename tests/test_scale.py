@@ -419,6 +419,31 @@ def test_detail_features_tell_neighbours_from_typos():
     assert f["name_extra_tok_s1"][2] == 1 and f["name_extra_tok_pool"][2] == 1
 
 
+def test_collective_features_count_addresses_names_and_aliases():
+    from ber.pairfeat import collective_features, collective_stats
+    from ber.table import build_table
+
+    def table(rows, source):
+        df = pd.DataFrame(
+            rows, columns=["entity_id", "business_name", "business_address", "country"]
+        )
+        return build_table(df, source, True, n_jobs=1)
+
+    s1 = table([("S1-1", "Pioneer Traders", "12 MG Road, Pune", "India"),
+                ("S1-2", "Sai Stores", "Pune, 12 MG Rd", "India"),
+                ("S1-3", "Acme Corp", "5 Main St, Springfield", "US")], 1)  # fmt: skip
+    pool = table([("S2-1", "Lumnylazeta", "12 MG Road, Pune", "India"),
+                  ("S3-1", "Lumnylazeta fka Pioneer Traders", "MG Road 12, Pune", "India"),
+                  ("S2-2", "Acme Corp", "5 Main Street, Springfield", "US")], 2)  # fmt: skip
+    stats = collective_stats(s1, pool)
+    f = collective_features(s1, pool, np.array([0, 0, 2]), np.array([0, 1, 2]), stats)
+    assert f["addr_s1_density"].tolist() == [2.0, 2.0, 1.0]  # two S1 businesses at 12 MG Rd, Pune
+    assert f["addr_pool_recurrence"].tolist() == [2.0, 2.0, 1.0]  # reordered copies share a key
+    assert f["name_pool_recurrence"][0] == 2.0  # "lumnylazeta" occurs twice in the pool
+    assert f["alias_link"][0] == pytest.approx(1.0)  # a sibling says "formerly Pioneer Traders"
+    assert np.isnan(f["alias_link"][2])
+
+
 def test_coherence_partner_is_the_best_other_candidate():
     from ber.scale import coherence_columns
 

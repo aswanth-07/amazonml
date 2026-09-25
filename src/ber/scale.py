@@ -48,6 +48,8 @@ from ber.metrics import (
     precision_recall,
 )
 from ber.pairfeat import (
+    collective_features,
+    collective_stats,
     detail_features,
     group_features,
     group_stats,
@@ -87,7 +89,7 @@ STAGE2_KEEP = (
 
 
 BLOCKING_VERSION = 1  # bump when tokens, weighting or search change which pairs blocking returns
-FEATURE_VERSION = 2  # bump when the stage-1 pair features change
+FEATURE_VERSION = 3  # bump when the stage-1 pair features change
 
 
 # ----------------------------------------------------------------------------- tables
@@ -151,6 +153,7 @@ class SplitData:
     # the token-view candidate set this one extends (key, rows, cols): its cached features
     # are reused for every pair the two sets share
     donor: tuple[str, np.ndarray, np.ndarray] | None = None
+    extras: dict[str, Any] = field(default_factory=dict)  # split-wide statistics, computed once
 
 
 def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -> SplitData:
@@ -391,7 +394,15 @@ FEATURE_GROUPS: dict[str, Any] = {
     "string": lambda sd, r, c: string_features(sd.s1, sd.pool, r, c),
     "number": lambda sd, r, c: number_features(sd.num_q, sd.num_d, r, c),
     "detail": lambda sd, r, c: detail_features(sd.s1, sd.pool, r, c),
+    "collective": lambda sd, r, c: collective_features(sd.s1, sd.pool, r, c, _collective(sd)),
 }
+
+
+def _collective(sd: SplitData) -> dict[str, Any]:
+    if "collective" not in sd.extras:
+        with timed(f"{sd.name}: collective statistics"):
+            sd.extras["collective"] = collective_stats(sd.s1, sd.pool)
+    return sd.extras["collective"]
 
 
 def intrinsic_features(

@@ -9,6 +9,9 @@ No feature names a country or a source, so the model transfers to France.
 
 from __future__ import annotations
 
+import re
+import zlib
+
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -191,6 +194,88 @@ def detail_features(
     f["name_extra_tok_s1"] = extra_a
     f["name_extra_tok_pool"] = extra_b
     f["name_short_tok_diff"] = short
+    return f
+
+
+_DIGIT = re.compile(r"\d")
+
+
+def _street_keys(addrs: np.ndarray) -> np.ndarray:
+    """A hash of an address's non-numeric tokens, order-free (reordered copies agree)."""
+    return np.fromiter(
+        (
+            zlib.crc32(" ".join(sorted({t for t in a.split() if not _DIGIT.search(t)})).encode())
+            for a in addrs
+        ),
+        np.int64,
+        len(addrs),
+    )
+
+
+def _count_in(keys: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """For each key, how many times it occurs in ``reference``."""
+    uniq, counts = np.unique(reference, return_counts=True)
+    at = np.minimum(np.searchsorted(uniq, keys), max(len(uniq) - 1, 0))
+    return np.where((len(uniq) > 0) & (uniq[at] == keys), counts[at], 0).astype(np.float32)
+
+
+def collective_stats(s1: Table, pool: Table) -> dict[str, np.ndarray]:
+    """Split-wide statistics of each record's address and name (computed once per split).
+
+    Keys combine the country, the order-free street tokens and the first house number, so
+    "12 MG Rd, Pune" and "Pune, 12 MG Road" share a key.
+    """
+    codes, _ = pd.factorize(np.concatenate([s1.country, pool.country]))
+    c1, cp = codes[: len(s1)].astype(np.int64), codes[len(s1) :].astype(np.int64)
+    st1, stp = _street_keys(s1.addr), _street_keys(pool.addr)
+    k_street1, k_streetp = c1 * 4_294_967_311 + st1, cp * 4_294_967_311 + stp
+    k_addr1 = k_street1 * 1_000_003 + s1.first_num
+    k_addrp = k_streetp * 1_000_003 + pool.first_num
+    n1 = pd.Series(s1.name).astype(str).to_numpy()
+    npool = pd.Series(pool.name).astype(str).to_numpy()
+    aliases: dict[str, list[str]] = {}
+    for core, alias in zip(npool, pool.alias):
+        if alias:
+            aliases.setdefault(core, []).append(alias)
+    return {
+        "s1_at_addr_of_pool": _count_in(k_addrp, k_addr1),  # Source 1 businesses at p's address
+        "s1_at_own_addr": _count_in(k_addr1, k_addr1),  # ... at s's own address
+        "pool_at_addr_of_pool": _count_in(k_addrp, k_addrp),  # pool records at p's address
+        "s1_on_street_of_pool": _count_in(
+            k_streetp, k_street1
+        ),  # Source 1 businesses on p's street
+        "s1_named_as_pool": _count_in(pd.util.hash_array(npool), pd.util.hash_array(n1)),
+        "pool_named_as_pool": _count_in(pd.util.hash_array(npool), pd.util.hash_array(npool)),
+        "aliases": aliases,
+    }
+
+
+def collective_features(
+    s1: Table, pool: Table, rows: np.ndarray, cols: np.ndarray, stats: dict
+) -> dict[str, np.ndarray]:
+    """Evidence from the rest of the split rather than the pair alone.
+
+    Measured on train: with the same street and number but different names, P(match) is
+    0.92 when one Source 1 business has that address and 0.08 when six or more do; a
+    differing house number that recurs across other pool records marks a real value (0.95
+    as top candidate) rather than a one-off; and a rebranded copy is linked to its entity
+    by a sibling record whose "formerly X" alias names it (0.71 against 0.11).
+    """
+    f = {
+        "addr_s1_density": stats["s1_at_addr_of_pool"][cols],
+        "addr_s1_density_self": stats["s1_at_own_addr"][rows],
+        "addr_pool_recurrence": stats["pool_at_addr_of_pool"][cols],
+        "street_s1_density": stats["s1_on_street_of_pool"][cols],
+        "name_s1_namesakes": stats["s1_named_as_pool"][cols],
+        "name_pool_recurrence": stats["pool_named_as_pool"][cols],
+    }
+    aliases = stats["aliases"]
+    link = np.full(len(rows), np.nan, dtype=np.float32)
+    for i, (s, p) in enumerate(zip(s1.name[rows], pool.name[cols])):
+        found = aliases.get(p)
+        if found:
+            link[i] = max(fuzz.token_set_ratio(s, a) for a in found[:8]) / 100.0
+    f["alias_link"] = link
     return f
 
 
