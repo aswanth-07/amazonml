@@ -194,12 +194,26 @@ def score(
     order = np.argsort(lengths, kind="stable")
     out = np.empty(len(rows), np.float16)
     t0 = time.time()
-    with torch.inference_mode():
-        for s in range(0, len(order), batch):
-            idx = order[s : s + batch]
+
+    def run(idx: np.ndarray) -> None:
+        """Score one batch; on running out of GPU memory (another job may share the GPU),
+        split it in half and retry rather than fail the whole run."""
+        try:
             x = tok([ta[i] for i in rows[idx]], [tb[i] for i in cols[idx]], padding=True,
                     truncation="longest_first", max_length=MAX_LEN, return_tensors="pt").to(dev)  # fmt: skip
             out[idx] = torch.sigmoid(model(**x).float()).cpu().numpy()
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if len(idx) <= 8:
+                raise
+            half = len(idx) // 2
+            run(idx[:half])
+            run(idx[half:])
+
+    with torch.inference_mode():
+        for s in range(0, len(order), batch):
+            idx = order[s : s + batch]
+            run(idx)
             if (s // batch) % 500 == 0:
                 log.info(
                     "scored %d/%d (%.0f/s)",
