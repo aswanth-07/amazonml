@@ -236,13 +236,17 @@ def finetune(
     scale: float = 20.0,
     hard_negatives: str | Path | None = None,
     seed: int = 42,
+    knn: str | Path | None = None,
 ) -> Path:
     """Symmetric in-batch contrastive fine-tuning on encoder-share train pairs.
 
     Each batch holds pairs from one country (so negatives are not trivially
     told apart by country). With a blocking cache, each query also brings its
-    highest-scoring non-matching candidate as a hard negative. Logits between
-    records of the same entity (other than the target) are masked.
+    highest-scoring non-matching candidate as a hard negative. With ``knn`` (the kNN
+    lists of an earlier encoder), the hard negative is instead the wrong neighbour that
+    encoder ranked highest (ANCE, Xiong et al. 2021): the exact confusion the new
+    encoder must learn to separate. Logits between records of the same entity (other
+    than the target) are masked.
     """
     import torch
     from transformers import AutoModel, AutoTokenizer
@@ -271,6 +275,20 @@ def finetune(
         first[1:] = r[order][1:] != r[order][:-1]
         hard[r[order][first]] = col[order][first]
         log.info("hard negatives for %d entities", int((hard >= 0).sum()))
+    if knn and Path(knn).exists():
+        with np.load(knn) as z:
+            r, col, sim = (
+                z["fwd_rows"].astype(np.int64),
+                z["fwd_cols"].astype(np.int64),
+                z["fwd_sim"],
+            )
+        neg = owner[col] != r
+        r, col, sim = r[neg], col[neg], sim[neg].astype(np.float32)
+        order = np.lexsort((-sim, r))
+        first = np.ones(len(order), bool)
+        first[1:] = r[order][1:] != r[order][:-1]
+        hard[r[order][first]] = col[order][first]  # overrides the token-blocking negative
+        log.info("embedding-neighbour hard negatives for %d entities", int((hard >= 0).sum()))
 
     s1_text = record_texts(s1)
     pool_text = record_texts(pool)
@@ -481,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emb-dir", default="artifacts/emb")
     ap.add_argument("--splits", default="train,test")
     ap.add_argument("--hard-negatives", default="")
+    ap.add_argument("--knn-negatives", default="", help="kNN lists of an earlier encoder (ANCE)")
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--batch", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=5e-5)
@@ -491,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
                         datefmt="%H:%M:%S")  # fmt: skip
     if args.command in ("finetune", "all"):
         finetune(args.data_dir, args.base, args.model, args.epochs, args.batch, args.lr,
-                 hard_negatives=args.hard_negatives or None)  # fmt: skip
+                 hard_negatives=args.hard_negatives or None, knn=args.knn_negatives or None)  # fmt: skip
     if args.command in ("encode", "all"):
         reports = [run_split(args.data_dir, s, args.model, args.emb_dir, args.k, args.k_reverse)
                    for s in args.splits.split(",")]  # fmt: skip

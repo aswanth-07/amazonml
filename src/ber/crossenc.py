@@ -42,16 +42,32 @@ def _text(df: pd.DataFrame) -> list[str]:
 
 
 def _model(init: str | Path, head: Path | None = None):
+    """An encoder with a one-logit head. A checkpoint that already is a one-logit sequence
+    classifier (a pretrained reranker such as bge-reranker-v2-m3) keeps its own trained
+    head; any other encoder gets a new linear head on its mean-pooled output."""
     import torch
-    from transformers import AutoModel
+    from transformers import AutoConfig, AutoModel, AutoModelForSequenceClassification
+
+    conf = AutoConfig.from_pretrained(init)
+    native = (
+        any(a.endswith("ForSequenceClassification") for a in (conf.architectures or []))
+        and conf.num_labels == 1
+    )
 
     class CrossEncoder(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.encoder = AutoModel.from_pretrained(init)
-            self.head = torch.nn.Linear(self.encoder.config.hidden_size, 1)
+            if native:
+                self.encoder = AutoModelForSequenceClassification.from_pretrained(init)
+                self.head = torch.nn.Identity()
+            else:
+                self.encoder = AutoModel.from_pretrained(init)
+                self.head = torch.nn.Linear(self.encoder.config.hidden_size, 1)
 
         def forward(self, input_ids, attention_mask, **kw):
+            if native:
+                out = self.encoder(input_ids=input_ids, attention_mask=attention_mask, **kw)
+                return out.logits.squeeze(-1)
             h = self.encoder(input_ids=input_ids, attention_mask=attention_mask, **kw)
             h = h.last_hidden_state
             m = attention_mask.unsqueeze(-1).to(h.dtype)
@@ -59,7 +75,7 @@ def _model(init: str | Path, head: Path | None = None):
             return self.head(v.to(self.head.weight.dtype)).squeeze(-1)
 
     model = CrossEncoder()
-    if head is not None:
+    if head is not None and not native:
         model.head.load_state_dict(torch.load(head, map_location="cpu"))
     return model
 
@@ -263,12 +279,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-neg", type=int, default=4)
     ap.add_argument("--knn", help="train: embedding kNN lists (npz) for extra hard negatives")
     ap.add_argument("--n-neg-knn", type=int, default=3)
+    ap.add_argument("--batch", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=3e-5)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")  # fmt: skip
     if args.command == "train":
         train(args.data_dir, args.init, args.blocking, args.model, args.n_neg, args.max_pairs,
-              knn=args.knn, n_neg_knn=args.n_neg_knn)  # fmt: skip
+              batch=args.batch, lr=args.lr, knn=args.knn, n_neg_knn=args.n_neg_knn)  # fmt: skip
     elif args.command == "eval":  # --pairs npz with rows, cols, labels; --model a,b,...
         with np.load(args.pairs) as z:
             rows, cols, y = z["rows"], z["cols"], z["labels"].astype(bool)
