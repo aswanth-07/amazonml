@@ -339,3 +339,107 @@ def test_groups_from_raw_data_hold_every_true_copy_and_same_country_negatives(
     assert (c1[rows] == cp[cols]).all()
     assert (~labels).sum() > 0 and (z["p1"] >= 0.05).all()
     assert np.array_equal(z["n_true"], np.bincount(a, minlength=len(s1)))
+
+
+# ----------------------------------------------------------------------------- C7: pool side
+def _pool_groups(data_dir, out, n_train=400):
+    subprocess.run(
+        [sys.executable, str(Path(__file__).parents[1] / "scripts" / "make_lw_groups.py"),
+         "--data-dir", str(data_dir), "--out", str(out), "--side", "pool",
+         "--train", str(n_train), "--valid", "80", "--unowned", "0.3"],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    return out
+
+
+def test_pool_side_groups_hold_the_owner_and_only_encoder_share_suitors(synthetic_dir, tmp_path):
+    from ber.embed import encoder_mask, load_frames, truth_pairs
+
+    z = np.load(_pool_groups(synthetic_dir, tmp_path / "p.npz"))
+    s1, pool = load_frames(synthetic_dir, "train")
+    a, b = truth_pairs(synthetic_dir, s1, pool)
+    enc = encoder_mask(s1["entity_id"].to_numpy())
+    owner = np.full(len(pool), -1)
+    owner[b] = a
+    rows, cols, labels = z["rows"], z["cols"], z["labels"]
+    assert str(z["side"]) == "pool" and len(z["train"]) == len(pool)
+    assert enc[rows].all()  # no holdout entity's label is learned
+    keys = np.flatnonzero(z["train"] | z["valid"])
+    owned = keys[owner[keys] >= 0]
+    assert set(zip(rows[labels].tolist(), cols[labels].tolist())) == set(
+        zip(owner[owned].tolist(), owned.tolist())
+    )
+    assert (owner[z["train"]] < 0).mean() > 0.2  # records nobody owns are in
+    assert (owner[cols[~labels]] != rows[~labels]).all()
+
+
+def test_tiny_pool_side_model_trains_with_orphans_and_scores_per_record(synthetic_dir, tmp_path):
+    from ber import listwise
+    from ber.embed import load_frames
+    from ber.scale import scorer_kind
+
+    groups = _pool_groups(synthetic_dir, tmp_path / "p.npz")
+    s1, pool = load_frames(synthetic_dir, "train")
+    init = _tiny_encoder(tmp_path / "tiny", listwise.texts(s1) + listwise.texts(pool))
+    out = listwise.train(synthetic_dir, init, groups, tmp_path / "lwp", k=8, max_len=128, batch=16,
+                         lr=1e-3, epochs=2, n_valid=40, eval_every=20, workers=0)  # fmt: skip
+    meta = json.loads((out / "listwise.json").read_text())
+    assert meta["side"] == "pool" and meta["drop_owner"] == 0.2
+    assert scorer_kind(out) == "listwise_pool"
+    with np.load(groups) as z:
+        rows, cols, p1 = z["rows"], z["cols"], z["p1"]
+    pp, gp = listwise.score(out, synthetic_dir, "train", rows, cols, p1, batch=32, workers=0)
+    assert not np.isnan(pp).any() and not np.isnan(gp).any()
+    per_record = pd.Series(gp.astype(np.float32)).groupby(cols).nunique()
+    assert (per_record == 1).all()  # one "someone owns it" probability per pool record
+    report = listwise.evaluate_models(groups, synthetic_dir, [str(out)], [], max_entities=60)
+    assert (
+        0 <= report["lw:lwp"]["owner_accuracy"] <= 1 and "macro_f05_proxy" not in report["lw:lwp"]
+    )
+
+
+def test_owner_accuracy_counts_right_owners_and_right_nones():
+    from ber.listwise import _owner_accuracy
+
+    keys = np.array([0, 0, 1, 1, 2])
+    y = np.array([True, False, False, False, True])
+    p = np.array([0.9, 0.2, 0.3, 0.1, 0.4])
+    # record 0: owner on top above 0.5 (right); record 1: nobody owns it, none pass (right);
+    # record 2: its owner scores 0.4, below the bar (wrong)
+    assert _owner_accuracy(keys, p, y) == 2 / 3
+
+
+def test_orphan_drop_removes_the_owner_from_a_share_of_groups():
+    rng = np.random.default_rng(0)
+    keys = np.repeat(np.arange(300), 3)
+    labels = np.tile([1.0, 0.0, 0.0], 300).astype(np.float32)
+    p1 = rng.random(len(keys)).astype(np.float32) * 0.5 + 0.1
+    ents = np.ones(300, dtype=bool)
+    groups = training_groups(keys, p1, ents, np.random.default_rng(1), 8, labels=labels,
+                             drop_owner=0.25)  # fmt: skip
+    without = np.mean([labels[g.idx].sum() == 0 for g in groups])
+    assert 0.15 < without < 0.35 and all(len(g.idx) for g in groups)
+
+
+def test_pool_side_scorer_gets_its_own_prefix(synthetic_dir, tmp_path):
+    from types import SimpleNamespace
+
+    from ber.embed import load_frames
+    from ber.scale import cross_scores
+
+    fake = (Path(__file__).parent / "fake_crossenc.py").as_posix()
+    lwp = tmp_path / "lwp-fake"
+    lwp.mkdir()
+    (lwp / "crossenc.json").write_text('{"kind": "listwise", "side": "pool"}')
+    cfg = load_config(None, [
+        f"scale.ce_model=unused_a,{lwp.as_posix()}",
+        f'scale.ce_python=\'"{Path(sys.executable).as_posix()}" "{fake}"\'',
+        "scale.ce_min_p1=0.5", f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
+    ])  # fmt: skip
+    s1, pool = load_frames(synthetic_dir, "train")
+    rng = np.random.default_rng(0)
+    sd = SimpleNamespace(name="train", rows=rng.integers(0, len(s1), 200),
+                         cols=rng.integers(0, len(pool), 200))  # fmt: skip
+    out = cross_scores(sd, cfg, rng.random(200), synthetic_dir, tmp_path)
+    assert set(out) == {"ce", "lwp", "lwp_grp"}
+    assert stage2_family("lwp_rank_pool") == "lwp_pool" and stage2_family("lwp") == "lwp"

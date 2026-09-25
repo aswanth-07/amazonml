@@ -102,10 +102,14 @@ def training_groups(
     k: int = K,
     thresholds: tuple[float, ...] = THRESHOLDS,
     p_overflow: float = 0.3,
+    labels: np.ndarray | None = None,
+    drop_owner: float = 0.0,
 ) -> list[Group]:
     """Groups for one epoch over the entities in the boolean mask ``entities``: each entity
     draws its own p1 floor (so the model sees small and large groups), keeps its first
-    group and, with probability ``p_overflow``, one of its overflow groups."""
+    group and, with probability ``p_overflow``, one of its overflow groups. With
+    ``drop_owner`` (pool side), that share of groups loses its true pairs, as a pool record
+    whose owner is missing from Source 1 (test's orphans) must be answered "none of these"."""
     floor = np.asarray(thresholds, dtype=np.float32)[
         rng.integers(0, len(thresholds), len(entities))
     ]
@@ -123,6 +127,15 @@ def training_groups(
         i = j
     for g in out:
         g.idx = keep[g.idx]
+    if drop_owner > 0 and labels is not None:
+        kept = []
+        for g in out:
+            if rng.random() < drop_owner:
+                wrong = labels[g.idx] == 0
+                g.idx, g.primary = g.idx[wrong], g.primary[wrong]
+            if len(g.idx):
+                kept.append(g)
+        out = kept
     return out
 
 
@@ -283,33 +296,49 @@ def collate(batch: list[Encoded], pad: int, labels: np.ndarray | None = None):
 
 
 class _Encoder:
-    """Turns groups into ``Encoded`` items from two token stores (Source 1 and pool) and the
-    split's pair arrays; usable as a map-style dataset."""
+    """Turns groups into ``Encoded`` items; usable as a map-style dataset. The query of a
+    group is the record at ``g.s1`` in ``q_store``; its candidates are the records at
+    ``cand[g.idx]`` in ``c_store``. Source 1 side: S1 query, pool candidates. Pool side
+    (C7): pool query, S1 suitors."""
 
-    def __init__(self, groups, rows, cols, s1_store, s1_slot, pool_store, pool_slot, special,
-                 max_len, len_s1, len_cand):  # fmt: skip
-        self.groups, self.rows, self.cols = groups, rows, cols
-        self.s1_store, self.s1_slot = s1_store, s1_slot
-        self.pool_store, self.pool_slot = pool_store, pool_slot
+    def __init__(self, groups, cand, q_store, q_slot, c_store, c_slot, special, max_len,
+                 len_s1, len_cand):  # fmt: skip
+        self.groups, self.cand = groups, cand
+        self.q_store, self.q_slot = q_store, q_slot
+        self.c_store, self.c_slot = c_store, c_slot
         self.cls, self.sep, _ = special
         self.max_len, self.len_s1, self.len_cand = max_len, len_s1, len_cand
+
+    @classmethod
+    def for_side(cls, side, groups, rows, cols, s1_store, s1_slot, pool_store, pool_slot,
+                 special, max_len, len_s1, len_cand):  # fmt: skip
+        if side == "pool":
+            return cls(groups, rows, pool_store, pool_slot, s1_store, s1_slot, special,
+                       max_len, len_s1, len_cand)  # fmt: skip
+        return cls(groups, cols, s1_store, s1_slot, pool_store, pool_slot, special, max_len,
+                   len_s1, len_cand)  # fmt: skip
 
     def __len__(self) -> int:
         return len(self.groups)
 
     def __getitem__(self, i: int) -> Encoded:
         g = self.groups[i]
-        q = self.s1_store.get(int(self.s1_slot[g.s1]))
-        cands = [self.pool_store.get(int(self.pool_slot[c])) for c in self.cols[g.idx]]
+        q = self.q_store.get(int(self.q_slot[g.s1]))
+        cands = [self.c_store.get(int(self.c_slot[c])) for c in self.cand[g.idx]]
         return encode_group(g, q, cands, self.cls, self.sep, self.max_len, self.len_s1,
                             self.len_cand)  # fmt: skip
 
     def approx_len(self, i: int) -> int:
         g = self.groups[i]
-        n = int(self.s1_store.len[self.s1_slot[g.s1]]) + int(
-            self.pool_store.len[self.pool_slot[self.cols[g.idx]]].sum()
+        n = int(self.q_store.len[self.q_slot[g.s1]]) + int(
+            self.c_store.len[self.c_slot[self.cand[g.idx]]].sum()
         )
         return min(n + len(g.idx) + 2, self.max_len)
+
+
+def keys_of(side: str, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    """The positions groups are keyed on: Source 1 records, or pool records (side "pool")."""
+    return cols if side == "pool" else rows
 
 
 def texts_at(data_dir, split: str, need1: np.ndarray, needp: np.ndarray):
@@ -417,11 +446,18 @@ def train(
     grad_ckpt: bool = False,
     workers: int = 4,
     seed: int = 42,
+    side: str | None = None,
+    drop_owner: float | None = None,
 ) -> Path:
-    """Fine-tune on the listwise-share groups of ``groups_path`` (written by ``ber.scale``,
-    ``lw_groups_train.npz``). Loss: BCE per candidate + ``group_weight`` x BCE of the group
-    head on "some candidate in the group matches". Validation log-loss on up to ``n_valid``
-    holdout entities every ``eval_every`` steps."""
+    """Fine-tune on the groups of ``groups_path`` (``lw_groups_train.npz`` from ``ber.scale``,
+    or ``scripts/make_lw_groups.py``). Loss: BCE per candidate + ``group_weight`` x BCE of
+    the group head on "some candidate in the group matches". Validation log-loss on up to
+    ``n_valid`` held-out keys every ``eval_every`` steps.
+
+    ``side`` (default: the groups file's, else "s1"): "s1" reads a Source 1 record with its
+    candidates; "pool" (C7) reads a pool record with its Source 1 suitors, and
+    ``drop_owner`` (default 0.2 there) of its groups lose their true owner, so the model
+    learns to answer "none of these" for test's orphaned copies."""
     import torch
     from transformers import AutoTokenizer
 
@@ -430,27 +466,31 @@ def train(
     z = np.load(groups_path)
     rows, cols, p1 = z["rows"].astype(np.int64), z["cols"].astype(np.int64), z["p1"]
     labels = z["labels"].astype(np.float32)
+    side = side or (str(z["side"]) if "side" in z.files else "s1")
+    if drop_owner is None:
+        drop_owner = 0.2 if side == "pool" else 0.0
+    keys = keys_of(side, rows, cols)
     ents = z["train"].astype(bool)
     if max_entities and ents.sum() > max_entities:
         keep = rng.choice(np.flatnonzero(ents), max_entities, replace=False)
         ents = np.zeros_like(ents)
         ents[keep] = True
     valid = np.zeros_like(ents)
-    held = np.flatnonzero(z["valid"].astype(bool) & np.isin(np.arange(len(ents)), rows))
+    held = np.flatnonzero(z["valid"].astype(bool) & np.isin(np.arange(len(ents)), keys))
     if n_valid and len(held):
         valid[rng.choice(held, min(n_valid, len(held)), replace=False)] = True
-    use = (ents | valid)[rows]
-    log.info("listwise training: %d entities, %d pairs (%.1f%% positive); %d validation entities",
-             int(ents.sum()), int((ents[rows]).sum()), 100 * labels[ents[rows]].mean(),
+    use = (ents | valid)[keys]
+    log.info("listwise training (%s side): %d keys, %d pairs (%.1f%% positive); %d validation keys",
+             side, int(ents.sum()), int((ents[keys]).sum()), 100 * labels[ents[keys]].mean(),
              int(valid.sum()))  # fmt: skip
 
     dev = _device()
     tok = AutoTokenizer.from_pretrained(init)
     special = _special(tok)
     stores = _stores(tok, data_dir, "train", rows[use], cols[use], LEN_S1, LEN_CAND)
-    vsel = np.flatnonzero(valid[rows] & (p1 >= 0.02))
-    v_enc = _Encoder(
-        [Group(g.s1, vsel[g.idx], g.primary) for g in build_groups(rows[vsel], p1[vsel], k, np.random.default_rng(0))],
+    vsel = np.flatnonzero(valid[keys] & (p1 >= 0.02))
+    v_enc = _Encoder.for_side(
+        side, [Group(g.s1, vsel[g.idx], g.primary) for g in build_groups(keys[vsel], p1[vsel], k, np.random.default_rng(0))],
         rows, cols, *stores, special, max_len, LEN_S1, LEN_CAND,
     )  # fmt: skip
 
@@ -462,7 +502,7 @@ def train(
         weight_decay=0.01,
     )
     per_epoch = math.ceil(
-        sum(1 for _ in training_groups(rows, p1, ents, np.random.default_rng(seed), k)) / batch
+        sum(1 for _ in training_groups(keys, p1, ents, np.random.default_rng(seed), k)) / batch
     )
     n_steps = max(1, math.ceil(per_epoch * epochs))
     warm = max(1, n_steps // 20)
@@ -505,15 +545,18 @@ def train(
                     "group_head": model.group_head.state_dict()}, out / "heads.pt")  # fmt: skip
         (out / "listwise.json").write_text(json.dumps(meta, indent=2))
 
-    meta = {"init": str(init), "k": k, "max_len": max_len, "len_s1": LEN_S1, "len_cand": LEN_CAND,
+    meta = {"init": str(init), "side": side, "drop_owner": drop_owner, "k": k, "max_len": max_len,
+            "len_s1": LEN_S1, "len_cand": LEN_CAND,
             "batch": batch, "lr": lr, "epochs": epochs, "steps": n_steps,
             "entities": int(ents.sum()), "groups_file": str(groups_path)}  # fmt: skip
     log.info("validation log-loss before training: %.4f", validate())
     t0 = time.time()
     step, epoch, skipped = 0, 0, 0
     while step < n_steps:
-        groups = training_groups(rows, p1, ents, np.random.default_rng(seed + epoch), k)
-        enc = _Encoder(groups, rows, cols, *stores, special, max_len, LEN_S1, LEN_CAND)
+        groups = training_groups(keys, p1, ents, np.random.default_rng(seed + epoch), k,
+                                 labels=labels, drop_owner=drop_owner)  # fmt: skip
+        enc = _Encoder.for_side(side, groups, rows, cols, *stores, special, max_len, LEN_S1,
+                                LEN_CAND)  # fmt: skip
         for b in _loader(enc, _length_batches(enc, batch, rng), special[2], labels, workers):
             if step >= n_steps:
                 break
@@ -561,8 +604,10 @@ def score(
     workers: int = 4,
     seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(P(match) per pair, P(some candidate of the pair's entity matches) per pair), as
-    float16 in the given order. Pairs are grouped per entity by ``p1`` as in training."""
+    """(P(match) per pair, P(some candidate in the pair's group matches) per pair), as
+    float16 in the given order. Pairs are grouped by ``p1`` as in training: per Source 1
+    entity, or per pool record for a pool-side model (C7), whose group probability is then
+    P(some suitor owns this record)."""
     import torch
     from transformers import AutoTokenizer
 
@@ -570,20 +615,22 @@ def score(
     meta = json.loads((model_dir / "listwise.json").read_text())
     k, max_len = int(meta["k"]), int(meta["max_len"])
     len_s1, len_cand = int(meta["len_s1"]), int(meta["len_cand"])
+    side = meta.get("side", "s1")
     rows, cols = rows.astype(np.int64), cols.astype(np.int64)
+    keys = keys_of(side, rows, cols)
     p1 = np.asarray(p1, dtype=np.float32)
     dev = _device()
     tok = AutoTokenizer.from_pretrained(model_dir)
     special = _special(tok)
-    groups = build_groups(rows, p1, k, np.random.default_rng(seed))
-    enc = _Encoder(groups, rows, cols, *_stores(tok, data_dir, split, rows, cols, len_s1, len_cand),
-                   special, max_len, len_s1, len_cand)  # fmt: skip
+    groups = build_groups(keys, p1, k, np.random.default_rng(seed))
+    stores = _stores(tok, data_dir, split, rows, cols, len_s1, len_cand)
+    enc = _Encoder.for_side(side, groups, rows, cols, *stores, special, max_len, len_s1, len_cand)
     model = _model(model_dir, model_dir / "heads.pt").to(dev).eval()
     amp = _autocast_dtype()
     if amp is not None:
         model = model.to(amp)
     out = np.full(len(rows), np.nan, np.float32)
-    first_group = np.full(int(rows.max()) + 1 if len(rows) else 0, np.nan, np.float32)
+    first_group = np.full(int(keys.max()) + 1 if len(keys) else 0, np.nan, np.float32)
     s1_of = np.fromiter((g.s1 for g in groups), np.int64, len(groups))
     is_first = np.r_[True, s1_of[1:] != s1_of[:-1]].astype(bool)[: len(groups)]
     t0, done = time.time(), 0
@@ -615,7 +662,7 @@ def score(
                 log.info("scored %d/%d groups (%.0f/s)", done, len(groups),
                          done / (time.time() - t0 + 1e-9))  # fmt: skip
     log.info("scored %d pairs in %d groups in %.0fs", len(rows), len(groups), time.time() - t0)
-    grp = first_group[rows] if len(rows) else np.empty(0, np.float32)
+    grp = first_group[keys] if len(keys) else np.empty(0, np.float32)
     return out.astype(np.float16), grp.astype(np.float16)
 
 
@@ -657,20 +704,23 @@ def evaluate_models(
     min_p1: float = 0.02,
     seed: int = 0,
 ) -> dict[str, dict]:
-    """Compare stage 1, pairwise cross-encoders and listwise models on the same holdout
-    entities of a groups file: pair AUC / log-loss and a macro-F0.5 proxy (exclusive,
-    one tuned threshold, pairs below ``min_p1`` never selected), plus the mean-logit blend
-    of every model with stage 1."""
+    """Compare stage 1, pairwise cross-encoders and listwise models on the same held-out keys
+    of a groups file: pair AUC / log-loss, plus the mean-logit blend of every model with
+    stage 1. Source 1 side: a macro-F0.5 proxy (exclusive, one tuned threshold, pairs below
+    ``min_p1`` never selected). Pool side (C7): owner accuracy, the share of pool records
+    whose best suitor above 0.5 is the owner, or that no suitor passes when nobody owns it."""
     from ber.crossenc import score as ce_score
 
     z = np.load(groups_path)
     rows, cols, p1 = z["rows"].astype(np.int64), z["cols"].astype(np.int64), z["p1"]
     labels, n_true = z["labels"].astype(bool), z["n_true"]
+    side = str(z["side"]) if "side" in z.files else "s1"
+    keys = keys_of(side, rows, cols)
     held = np.flatnonzero(z["valid"].astype(bool))
-    held = held[np.isin(held, rows)]
+    held = held[np.isin(held, keys)]
     rng = np.random.default_rng(seed)
     ents = np.sort(rng.choice(held, min(max_entities, len(held)), replace=False))
-    sel = np.isin(rows, ents) & (p1 >= min_p1)
+    sel = np.isin(keys, ents) & (p1 >= min_p1)
     r, c, q, y = rows[sel], cols[sel], p1[sel].astype(np.float32), labels[sel]
     scores = {"stage1_p1": q}
     for m in ce_models:
@@ -685,10 +735,25 @@ def evaluate_models(
             scores[f"blend:{k}+p1"] = 1 / (1 + np.exp(-(logit[k] + logit["stage1_p1"]) / 2))
     report = {}
     for k, v in scores.items():
-        t, f = _macro(r, c, v, y, n_true, ents)
-        report[k] = {**_auc_logloss(v, y), "macro_f05_proxy": round(f, 5), "threshold": t}
+        if side == "pool":
+            report[k] = {**_auc_logloss(v, y), "owner_accuracy": round(_owner_accuracy(c, v, y), 5)}
+        else:
+            t, f = _macro(r, c, v, y, n_true, ents)
+            report[k] = {**_auc_logloss(v, y), "macro_f05_proxy": round(f, 5), "threshold": t}
         log.info("%s: %s", k, report[k])
     return report
+
+
+def _owner_accuracy(keys: np.ndarray, p: np.ndarray, y: np.ndarray, t: float = 0.5) -> float:
+    """Per key (pool record): right when its best pair is above ``t`` and true, or when no
+    pair is above ``t`` and none is true (the record is an orphan or a decoy)."""
+    order = np.lexsort((-p, keys))
+    k, pp, yy = keys[order], p[order], y[order]
+    first = np.r_[True, k[1:] != k[:-1]]
+    has_true = np.bincount(np.searchsorted(k[first], k), weights=yy.astype(float)) > 0
+    top_p, top_y = pp[first], yy[first]
+    right = np.where(top_p >= t, top_y, ~has_true)
+    return float(right.mean()) if len(right) else float("nan")
 
 
 # ----------------------------------------------------------------------------- driver

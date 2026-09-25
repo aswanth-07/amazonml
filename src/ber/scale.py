@@ -724,7 +724,7 @@ def cross_scores(
     env = {**os.environ, "PYTHONPATH": str(src)}
     out: dict[str, np.ndarray] = {}
     band = [float(x) for x in sc.ce_band.split(",")] if sc.ce_band else None
-    seen = {"pairwise": 0, "listwise": 0}
+    seen = {"pairwise": 0, "listwise": 0, "listwise_pool": 0}
     for model in models:
         done = Path(model) / "crossenc.json"  # written last by ber.crossenc / ber.listwise train
         waited = 0
@@ -735,9 +735,9 @@ def cross_scores(
             waited += 30
         kind = scorer_kind(model)
         seen[kind] += 1
-        stem = "lw" if kind == "listwise" else "ce"
+        stem = {"listwise": "lw", "listwise_pool": "lwp"}.get(kind, "ce")
         prefix = stem if seen[kind] == 1 else f"{stem}{seen[kind]}"
-        module = "ber.listwise" if kind == "listwise" else "ber.crossenc"
+        module = "ber.crossenc" if kind == "pairwise" else "ber.listwise"
         scores = work_dir / f"{sd.name}_{prefix}_scores.npy"
         todo, todo_pairs = sel, pairs
         if kind == "pairwise" and prefix != "ce" and band is not None and "ce" in out:
@@ -753,7 +753,7 @@ def cross_scores(
         # the same model on the same pairs (and, for a listwise model, the same p1 that
         # groups them) gives the same scores: a later run reuses them instead of rescoring
         key = _score_key(model, sd.name, sd.rows[todo], sd.cols[todo],
-                         p1[todo] if kind == "listwise" else None)  # fmt: skip
+                         p1[todo] if kind != "pairwise" else None)  # fmt: skip
         cached = Path(sc.cache_dir) / "scores" / f"{sd.name}_{key}.npy"
         cached_group = cached.with_name(f"{cached.stem}_grp.npy")
         if cached.exists():
@@ -799,18 +799,21 @@ def stage2_monotone(names: list[str]) -> list[int]:
     """LightGBM monotone constraints: a higher probability from stage 1 or any cross-encoder
     or listwise model may only raise the stage-2 probability. Keeps the stack from learning
     interactions that flip under the train-to-test shift."""
-    return [1 if n == "p1" or re.fullmatch(r"(?:ce|lw)\d*", n) else 0 for n in names]
+    return [1 if n == "p1" or re.fullmatch(r"(?:ce|lwp|lw)\d*", n) else 0 for n in names]
 
 
 def scorer_kind(model: str | Path) -> str:
-    """The scorer a model directory needs: "listwise" (ber.listwise) or "pairwise" (ber.crossenc)."""
+    """The scorer a model directory needs: "listwise" (ber.listwise, Source 1 side),
+    "listwise_pool" (ber.listwise, pool side: C7) or "pairwise" (ber.crossenc)."""
     done = Path(model) / "crossenc.json"
-    if done.exists():
-        try:
-            return str(json.loads(done.read_text()).get("kind", "pairwise"))
-        except json.JSONDecodeError:
-            return "pairwise"
-    return "pairwise"
+    if not done.exists():
+        return "pairwise"
+    try:
+        info = json.loads(done.read_text())
+    except json.JSONDecodeError:
+        return "pairwise"
+    kind = str(info.get("kind", "pairwise"))
+    return "listwise_pool" if kind == "listwise" and info.get("side") == "pool" else kind
 
 
 def scorer_columns(
@@ -836,7 +839,7 @@ def scorer_columns(
     return out
 
 
-_SCORER = re.compile(r"^((?:ce|lw)\d*)(?:_(.*))?$")
+_SCORER = re.compile(r"^((?:ce|lwp|lw)\d*)(?:_(.*))?$")
 
 
 def stage2_family(name: str) -> str:
