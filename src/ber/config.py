@@ -160,6 +160,7 @@ class ScaleConfig:
     ce_model: str = ""  # cross-encoder from ber.crossenc; "" disables the stage-2 ce feature
     ce_python: str = "py -3.13"  # interpreter with torch + transformers that runs it
     ce_min_p1: float = 0.02  # pairs scored by the cross-encoder: stage-1 probability >= this
+    ce_wait: int = 0  # seconds to wait for a cross-encoder that is still training
 
 
 @dataclass

@@ -571,6 +571,13 @@ def cross_scores(
     sc = cfg.scale
     if not sc.ce_model:
         return None
+    done = Path(sc.ce_model) / "crossenc.json"  # written last by ber.crossenc train
+    waited = 0
+    while not done.exists() and waited < sc.ce_wait:  # the model may still be training
+        if waited % 300 == 0:
+            log.info("waiting for the cross-encoder at %s (%ds so far)", sc.ce_model, waited)
+        time.sleep(30)
+        waited += 30
     sel = p1 >= sc.ce_min_p1
     if only is not None:
         sel &= only[sd.rows]

@@ -107,7 +107,7 @@ def embedding_key(emb_dir: str | Path, split: str) -> str:
     return "|".join(parts)
 
 
-def dense_row_dot(a, b, rows, cols, chunk: int = 1_000_000, n_threads: int = 8) -> np.ndarray:
+def dense_row_dot(a, b, rows, cols, chunk: int = 200_000, n_threads: int = 8) -> np.ndarray:
     """a[rows[i]] . b[cols[i]] in float32 for float16 embedding matrices, chunked on threads."""
     from concurrent.futures import ThreadPoolExecutor
 
