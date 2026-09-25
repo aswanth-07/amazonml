@@ -687,38 +687,46 @@ def cross_scores(
     data_dir: str | Path,
     work_dir: Path,
     only: np.ndarray | None = None,
-) -> np.ndarray | None:
-    """Cross-encoder probability for every pair with stage-1 p1 >= ``ce_min_p1`` (NaN for the
-    rest), run in the torch interpreter. ``only``: boolean mask of S1 positions to score."""
+) -> dict[str, np.ndarray]:
+    """Cross-encoder probabilities for every pair with stage-1 p1 >= ``ce_min_p1`` (NaN for
+    the rest), run in the torch interpreter, one array per model in ``scale.ce_model``
+    (comma-separated): "ce" for the first, then "ce2", "ce3", ... so stage 2 learns how to
+    weigh several cross-encoders. ``only``: boolean mask of S1 positions to score."""
     import os
     import shlex
     import subprocess
 
     sc = cfg.scale
-    if not sc.ce_model:
-        return None
-    done = Path(sc.ce_model) / "crossenc.json"  # written last by ber.crossenc train
-    waited = 0
-    while not done.exists() and waited < sc.ce_wait:  # the model may still be training
-        if waited % 300 == 0:
-            log.info("waiting for the cross-encoder at %s (%ds so far)", sc.ce_model, waited)
-        time.sleep(30)
-        waited += 30
+    models = [m.strip() for m in sc.ce_model.split(",") if m.strip()]
+    if not models:
+        return {}
     sel = p1 >= sc.ce_min_p1
     if only is not None:
         sel &= only[sd.rows]
     sel = np.flatnonzero(sel)
-    pairs, out = work_dir / f"{sd.name}_ce_pairs.npz", work_dir / f"{sd.name}_ce_scores.npy"
+    pairs = work_dir / f"{sd.name}_ce_pairs.npz"
     np.savez(pairs, rows=sd.rows[sel], cols=sd.cols[sel])
     src = Path(__file__).resolve().parents[1]
-    cmd = [*shlex.split(sc.ce_python), "-m", "ber.crossenc", "score", "--model", sc.ce_model,
-           "--data-dir", str(data_dir), "--split", sd.name, "--pairs", str(pairs), "--out", str(out)]  # fmt: skip
     env = {**os.environ, "PYTHONPATH": str(src)}
-    with timed(f"{sd.name}: cross-encoder on {len(sel):,} pairs"):
-        subprocess.run(cmd, check=True, env=env)
-    ce = np.full(len(sd.rows), np.nan, dtype=np.float32)
-    ce[sel] = np.load(out).astype(np.float32)
-    return ce
+    out: dict[str, np.ndarray] = {}
+    for i, model in enumerate(models):
+        prefix = "ce" if i == 0 else f"ce{i + 1}"
+        done = Path(model) / "crossenc.json"  # written last by ber.crossenc train
+        waited = 0
+        while not done.exists() and waited < sc.ce_wait:  # the model may still be training
+            if waited % 300 == 0:
+                log.info("waiting for the cross-encoder at %s (%ds so far)", model, waited)
+            time.sleep(30)
+            waited += 30
+        scores = work_dir / f"{sd.name}_{prefix}_scores.npy"
+        cmd = [*shlex.split(sc.ce_python), "-m", "ber.crossenc", "score", "--model", model,
+               "--data-dir", str(data_dir), "--split", sd.name, "--pairs", str(pairs), "--out", str(scores)]  # fmt: skip
+        with timed(f"{sd.name}: cross-encoder {model} on {len(sel):,} pairs"):
+            subprocess.run(cmd, check=True, env=env)
+        ce = np.full(len(sd.rows), np.nan, dtype=np.float32)
+        ce[sel] = np.load(scores).astype(np.float32)
+        out[prefix] = ce
+    return out
 
 
 def coherence_columns(
@@ -758,18 +766,18 @@ def _pool_embeddings(sd: SplitData, cfg: Config) -> np.ndarray:
     return load_embeddings(cfg.scale.emb_dir, sd.name, sd.s1.ids, sd.pool.ids)[1]
 
 
-def ce_columns(rows: np.ndarray, ce: np.ndarray) -> dict[str, np.ndarray]:
+def ce_columns(rows: np.ndarray, ce: np.ndarray, prefix: str = "ce") -> dict[str, np.ndarray]:
     """The cross-encoder probability and how it ranks among the entity's scored candidates."""
     v = np.nan_to_num(ce, nan=-1.0)
     rank, best, second, _ = group_stats(rows, v)
     scored = ~np.isnan(ce)
     return {
-        "ce": ce,
-        "ce_rank_s1": np.where(scored, rank, np.nan).astype(np.float32),
-        "ce_gap_s1": np.where(scored, v - best, np.nan).astype(np.float32),
-        "ce_margin_s1": np.where(scored, np.where(rank == 0, v - second, v - best), np.nan).astype(
-            np.float32
-        ),
+        prefix: ce,
+        f"{prefix}_rank_s1": np.where(scored, rank, np.nan).astype(np.float32),
+        f"{prefix}_gap_s1": np.where(scored, v - best, np.nan).astype(np.float32),
+        f"{prefix}_margin_s1": np.where(
+            scored, np.where(rank == 0, v - second, v - best), np.nan
+        ).astype(np.float32),
     }
 
 
@@ -980,9 +988,8 @@ def run(
     final_p, stage2, s2_names, thr = p1, [], [], summary["stage1"]["threshold"]
 
     # ---- cross-encoder on uncertain pairs of entities it was not trained on
-    ce = cross_scores(sd, cfg, p1, data_dir, run_dir, only=eligible)
-    if ce is not None:
-        keep.update(ce_columns(sd.rows, ce))
+    for prefix, ce in cross_scores(sd, cfg, p1, data_dir, run_dir, only=eligible).items():
+        keep.update(ce_columns(sd.rows, ce, prefix))
         summary["cross_encoder_pairs"] = int((~np.isnan(ce)).sum())
         del ce
     if cfg.scale.emb_dir:
@@ -1172,9 +1179,9 @@ def predict_split(
         cand_score = sd.base["score"]
         sd.base = {"score": cand_score}
         if "ce" in model.stage2_names:
-            ce = cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir))
-            keep.update(ce_columns(sd.rows, ce))
-            del ce
+            for prefix, ce in cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir)).items():
+                keep.update(ce_columns(sd.rows, ce, prefix))
+                del ce
         if "coh_emb" in model.stage2_names:
             keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))
         cols2 = stage2_columns(sd.rows, sd.cols, p1, keep)

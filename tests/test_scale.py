@@ -433,7 +433,7 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
             f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
             f"runs_dir={(tmp_path / 'runs').as_posix()}",
             f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
-            "scale.ce_model=unused",
+            "scale.ce_model=unused_a,unused_b",
             f'scale.ce_python=\'"{Path(sys.executable).as_posix()}" "{fake}"\'',
             "scale.ce_min_p1=0.001",
             "scale.train_sample=250",
@@ -449,7 +449,7 @@ def test_scale_run_with_cross_encoder(synthetic_dir, tmp_path: Path):
     assert summary["cross_encoder_pairs"] > 0
     run_dir = next((tmp_path / "runs").iterdir())
     names = pd.read_csv(run_dir / "feature_importance_stage2.tsv", sep="\t")["feature"].tolist()
-    assert {"ce", "ce_rank_s1", "ce_gap_s1", "ce_margin_s1"} <= set(names)
+    assert {"ce", "ce_rank_s1", "ce_gap_s1", "ce_margin_s1", "ce2", "ce2_rank_s1"} <= set(names)
 
 
 def test_detail_features_tell_neighbours_from_typos():
