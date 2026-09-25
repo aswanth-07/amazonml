@@ -31,8 +31,8 @@ Full brief: [docs/problem_statement.md](docs/problem_statement.md).
 | Version | What it is | Holdout macro F0.5 (train) | Public LB |
 |---|---|---|---|
 | **v1 baseline** (tag `v1-baseline`, commit 4ddca44) | token blocking + LightGBM + stacked LightGBM | **0.9645** | pending, fill in |
-| v2 (main, running on the lead's laptop) | v1 + fine-tuned embedding blocking + cross-encoder + detail/coherence features + tuned decision rules | pending (~16:30 today) | |
-| v3 (main, code ready) | v2 + collective features | not run yet | |
+| v2 (commit 241b5af) | v1 + fine-tuned embedding blocking + embedding cosine + detail features, 500k training entities | **stage 1: 0.9803** (OOF 0.9800); stage 2 crashed on a cross-encoder dtype bug, fixed in 71533e9 | |
+| v3 (main, running since 16:15) | v2 + collective features + cross-encoder + coherence + tuned decision rules | pending (~17:30) | |
 
 Leaderboard on 2026-09-25: 1st 0.9805, 2nd 0.9803, 3rd 0.9789. The target is ~0.99.
 
