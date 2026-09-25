@@ -4,7 +4,7 @@ Read this first, whether you are a teammate or an agent working for one. It says
 what the task is, what has been built, what it scores, how to run it, what was
 learned, and which open directions are free for a branch to take.
 
-Last updated 2026-09-25 16:00 IST.
+Last updated 2026-09-25 17:05 IST.
 
 ---
 
@@ -102,6 +102,36 @@ Blocking is solved; **the matcher is the whole gap.**
     (0.95 as top candidate) rather than a one-off (0.58).
 - **France.** The normaliser already handles French legal forms (SARL, SAS, SASU, EURL,
   SNC, SA) and addresses (R./rue, AV, BD, #/No).
+
+## 3b. What the models taught us (read before designing v4)
+
+1. **The embedding similarity drives the matcher.** v2 stage-1 gain shares:
+   `cos_emb_rank_pool` 24.1%, `cos_emb` 22.7%, `cos_emb_margin_pool` 20.1%,
+   `cos_emb_gap_pool` 12.1%, so **79% comes from the fine-tuned embedding**, mostly
+   **pool-side competition** (is this S1 the pool record's best suitor?). Next come
+   house-number conflict/Jaccard/log-difference (7%) and address token set (1.8%). The
+   embedding model is the main quality lever.
+2. **Blocking is solved.** The union of token blocking and embedding kNN (k=10, reverse
+   1) holds 99.36% of true pairs; oracle F0.5 is 0.9982.
+3. **The cross-encoder is very strong pairwise.** On 600k held-out top-10 candidate
+   pairs, `ce-small-v2` scores AUC 0.99985, log-loss 0.0139, best pair F0.5 0.9925. More
+   data and embedding-neighbour negatives cut log-loss 36% against `ce-small`.
+4. **Train → test shift (explains 0.9645 → 0.947 public).** Test has **5.5-5.8 pool
+   records per S1** against **4.68 in train**, in every country, so ~40% of the test
+   pool matches nothing, against 26% in train. The likely cause is orphaned copies
+   (businesses left out of test Source 1 whose copies remain in the pool). Because the
+   model relies on pool-side competition, an orphan's next-best S1 suitor looks like
+   its owner: exactly the signal that dominates (point 1). **Remedy under test:**
+   simulate it in train by removing ~19% of S1 businesses from the candidate set
+   (keeping their copies), then train and tune the decision under that condition.
+5. **France looks normal in the test predictions.** 5.4% predicted singletons and 3.46
+   matches per business, against 5.6% and 3.46 in train truth. India is the weaker
+   country (US 0.970, India 0.955 on the v1 holdout).
+6. **Error types (v1).** Wrong merges are neighbours and namesakes (same name,
+   neighbouring house number; one-letter name difference at the same address). Misses
+   are heavy transliteration, addresses cut to a city or empty, and renames without an
+   alias.
+7. **The weakest group is entities with exactly one true match** (F0.5 0.866 in v1).
 
 ## 4. Architecture
 
@@ -235,14 +265,16 @@ your holdout number when done.
 
 | # | Direction | Why it may pay | Status / owner |
 |---|---|---|---|
-| A | **Bigger cross-encoder** (multilingual-e5-base, 278M, MIT) | the matcher is the gap; the cross-encoder attacks neighbour and rename confusions | lead: downloading e5-base; ce-small-v2 (4M pairs) training |
+| A | **Cross-encoder improvements** (more pairs, harder negatives, larger backbone) | attacks neighbour and rename confusions | lead: ce-small-v2 done (best so far); e5-base see J |
 | B | **Training-set size and seed bagging** | v2 trains on 500k of 1.32M eligible entities | lead: `scripts/learning_curve.py` after v2 |
 | C | **France / unseen country**: leave-one-country-out as a proxy (train US, score India); drop features that do not transfer; self-training on confident French pairs | 15% of test, unmeasurable locally | open |
 | D | **Count-aware decision**: predict each entity's number of copies, then choose the set maximising expected F0.5 | entities with one true match score 0.866 | open (offline on `train_scores.npz`) |
 | E | **Set-level assignment**: near-duplicate pool records (siblings) must go to the same S1 entity or to none | stops partial merges of distractor copies | open (needs a pool-to-pool kNN) |
 | F | **Consensus features**: majority house number, street and name across a candidate's siblings, compared with S1 | recovers typo'd copies, rejects neighbours | open |
 | G | **Regime experts**: separate stage-2 models for same-name/different-number, different-name/same-address, and the rest | two unrelated confusions share one threshold today | open |
-| H | **Second-round bi-encoder** with hard negatives mined from its own kNN (ANCE) | better cos_emb feature (recall is already 0.994) | watch |
+| H | **Better bi-encoder**: second round with hard negatives mined from its own kNN (ANCE), and/or the larger multilingual-e5-base | the embedding drives 79% of the matcher's gain (section 3b) | **high priority**, open |
+| I | **Orphan simulation**: drop ~19% of train S1 businesses from the candidate set (keep their copies), then train and tune under that condition | the train→test decoy shift (section 3b, point 4) likely explains most of the 0.9645 → 0.947 gap | lead: testing on v3's saved scores |
+| J | **e5-base cross-encoder** (278M, MIT) | stronger pairwise model | lead: training, ETA 18:07 |
 | — | LLM matcher (7-8B) | rejected: tens of pairs per second against millions of uncertain pairs | rejected |
 
 Every run writes `train_scores.npz` (each pair's final probability, label, entity sets
