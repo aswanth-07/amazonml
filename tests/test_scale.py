@@ -239,6 +239,43 @@ def test_scale_run_on_synthetic(synthetic_dir, tmp_path: Path):
         assert a == (tmp_path / "out2" / name).read_bytes()
 
 
+@pytest.mark.slow
+def test_new_feature_group_reuses_older_columns(synthetic_dir, tmp_path: Path, monkeypatch):
+    import ber.scale as scale
+
+    def cfg_for(cache: str):
+        return load_config(
+            None,
+            [
+                f"scale.cache_dir={(tmp_path / cache).as_posix()}",
+                f"runs_dir={(tmp_path / 'runs' / cache).as_posix()}",
+                f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
+                "scale.train_sample=250", "scale.n_jobs=1", "scale.n_threads=2",
+                "model.n_folds=3", "model.num_boost_round=100", "model.early_stopping_rounds=20",
+            ],
+        )  # fmt: skip
+
+    scale.run(cfg_for("warm"), synthetic_dir, tmp_path / "o1")  # caches at the current version
+
+    def extra_group(sd, r, c):
+        a = np.char.str_len(sd.s1.name[r].astype("U")) + np.char.str_len(
+            sd.pool.name[c].astype("U")
+        )
+        return {"name_len_sum": a.astype(np.float32)}
+
+    extra = {**scale.FEATURE_GROUPS, "extra": extra_group}
+    monkeypatch.setattr(scale, "FEATURE_GROUPS", extra)
+    monkeypatch.setattr(scale, "FEATURE_VERSION", scale.FEATURE_VERSION + 1)
+    scale.run(cfg_for("warm"), synthetic_dir, tmp_path / "warm")  # old columns copied
+    scale.run(cfg_for("cold"), synthetic_dir, tmp_path / "cold")  # everything computed
+    for split in ("train", "test"):
+        (w,) = (tmp_path / "warm").glob(f"{split}_features_*_v{scale.FEATURE_VERSION}.npy")
+        (c,) = (tmp_path / "cold").glob(f"{split}_features_*_v{scale.FEATURE_VERSION}.npy")
+        assert np.array_equal(np.load(w), np.load(c), equal_nan=True)
+    for name in ("matching_results.tsv", "candidate_pairs.tsv"):
+        assert (tmp_path / "warm" / name).read_bytes() == (tmp_path / "cold" / name).read_bytes()
+
+
 def _fake_embeddings(data_dir: Path, emb_dir: Path, k: int = 10, dim: int = 64) -> None:
     """Embeddings and kNN files in ber.embed's format, from hashed name trigrams (no torch)."""
     import zlib

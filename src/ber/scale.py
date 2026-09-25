@@ -383,17 +383,38 @@ def pair_features(sd: SplitData, idx: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(cols_out)
 
 
-def intrinsic_features(sd: SplitData, idx: np.ndarray) -> dict[str, np.ndarray]:
-    """Features that depend only on the two records of a pair, not on the candidate set."""
+# Record-pair features in named groups. A cached matrix from an earlier FEATURE_VERSION
+# supplies every column it has, and only the missing groups are computed, so adding a group
+# costs that group alone. Changing what an existing column means therefore needs a new
+# column name, not just a version bump.
+FEATURE_GROUPS: dict[str, Any] = {
+    "string": lambda sd, r, c: string_features(sd.s1, sd.pool, r, c),
+    "number": lambda sd, r, c: number_features(sd.num_q, sd.num_d, r, c),
+    "detail": lambda sd, r, c: detail_features(sd.s1, sd.pool, r, c),
+}
+
+
+def intrinsic_features(
+    sd: SplitData, idx: np.ndarray, groups: list[str] | None = None
+) -> dict[str, np.ndarray]:
+    """Features that depend only on the two records of a pair (and split-wide statistics),
+    not on the candidate set; ``groups`` limits which groups are computed."""
     rows, cols = sd.rows[idx], sd.cols[idx]
-    out = string_features(sd.s1, sd.pool, rows, cols)
-    out.update(number_features(sd.num_q, sd.num_d, rows, cols))
-    out.update(detail_features(sd.s1, sd.pool, rows, cols))
+    out: dict[str, np.ndarray] = {}
+    for name, fn in FEATURE_GROUPS.items():
+        if groups is None or name in groups:
+            out.update(fn(sd, rows, cols))
     return out
 
 
-def _feature_path(cfg: Config, split: str, key: str) -> Path:
-    return Path(cfg.scale.cache_dir) / f"{split}_features_{key}_v{FEATURE_VERSION}.npy"
+def _group_columns(sd: SplitData) -> dict[str, list[str]]:
+    probe = np.arange(min(2, len(sd.rows)))
+    return {g: list(intrinsic_features(sd, probe, [g])) for g in FEATURE_GROUPS}
+
+
+def _feature_path(cfg: Config, split: str, key: str, version: int | None = None) -> Path:
+    v = FEATURE_VERSION if version is None else version
+    return Path(cfg.scale.cache_dir) / f"{split}_features_{key}_v{v}.npy"
 
 
 def _load_features(path: Path):
@@ -403,16 +424,27 @@ def _load_features(path: Path):
     return None
 
 
-def _donor_source(sd: SplitData, cfg: Config):
-    """(donor feature matrix, intrinsic column names and their donor positions, donor row per
-    pair or -1) when the candidate set this one extends has cached features; else None."""
+def _latest_features(cfg: Config, split: str, key: str, max_version: int):
+    for v in range(max_version, 0, -1):
+        if (loaded := _load_features(_feature_path(cfg, split, key, v))) is not None:
+            return v, loaded
+    return None
+
+
+def _reuse_source(sd: SplitData, cfg: Config):
+    """(matrix, column names, row in it for each pair or -1, description) from the newest
+    earlier-version matrix of this candidate set, else from the token-view set it extends."""
+    if sd.key and (hit := _latest_features(cfg, sd.name, sd.key, FEATURE_VERSION - 1)):
+        v, (feats, names) = hit
+        if feats.shape[0] == len(sd.rows):
+            return feats, names, np.arange(len(sd.rows)), f"same pairs, v{v}"
     if sd.donor is None:
         return None
     key, d_rows, d_cols = sd.donor
-    loaded = _load_features(_feature_path(cfg, sd.name, key))
-    if loaded is None or len(d_rows) == 0:
+    hit = _latest_features(cfg, sd.name, key, FEATURE_VERSION)
+    if hit is None or len(d_rows) == 0:
         return None
-    feats, names = loaded
+    v, (feats, names) = hit
     n_d = len(sd.pool)
     kd = d_rows.astype(np.int64) * n_d + d_cols
     order = np.argsort(kd, kind="stable")
@@ -420,23 +452,31 @@ def _donor_source(sd: SplitData, cfg: Config):
     kn = sd.rows.astype(np.int64) * n_d + sd.cols
     at = np.minimum(np.searchsorted(ks, kn), len(ks) - 1)
     pos = np.where(ks[at] == kn, order[at], -1)
-    intrinsic = [c for c in names if c not in sd.base]
-    log.info("%s: reusing features of %d/%d pairs", sd.name, int((pos >= 0).sum()), len(pos))
-    return feats, intrinsic, [names.index(c) for c in intrinsic], pos
+    return feats, names, pos, f"token-view pairs, v{v}"
 
 
-def _features_with_donor(sd: SplitData, idx: np.ndarray, donor) -> pd.DataFrame:
-    feats, intrinsic, src, pos = donor
+def _features_reused(sd: SplitData, idx: np.ndarray, src, group_cols) -> pd.DataFrame:
+    feats, names, pos, _ = src
+    have_col = set(names)
     p = pos[idx]
     have = p >= 0
-    block = np.empty((len(idx), len(intrinsic)), np.float32)
+    columns = [c for cs in group_cols.values() for c in cs]
+    block = {c: np.full(len(idx), np.nan, np.float32) for c in columns}
     if have.any():
-        block[have] = np.asarray(feats[p[have]])[:, src]
-    if (~have).any():
-        f = intrinsic_features(sd, idx[~have])
-        block[~have] = np.column_stack([np.asarray(f[c], np.float32) for c in intrinsic])
-    x = pd.DataFrame({k: v[idx] for k, v in sd.base.items()})
-    return pd.concat([x, pd.DataFrame(block, columns=intrinsic)], axis=1)
+        raw = np.asarray(feats[p[have]])
+        for c in columns:
+            if c in have_col:
+                block[c][have] = raw[:, names.index(c)]
+        missing = [g for g, cs in group_cols.items() if any(c not in have_col for c in cs)]
+        if missing:  # new groups, for the pairs the source covers
+            for c, v in intrinsic_features(sd, idx[have], missing).items():
+                block[c][have] = v
+    if (~have).any():  # pairs the source does not cover: every group
+        for c, v in intrinsic_features(sd, idx[~have]).items():
+            block[c][~have] = v
+    x = {k: v[idx] for k, v in sd.base.items()}
+    x.update(block)
+    return pd.DataFrame(x)
 
 
 def feature_matrix(sd: SplitData, cfg: Config) -> tuple[np.ndarray, list[str]]:
@@ -444,8 +484,8 @@ def feature_matrix(sd: SplitData, cfg: Config) -> tuple[np.ndarray, list[str]]:
 
     With a split key it is a memory-mapped ``.npy`` in the cache directory; its column
     names are written last, so a file from an interrupted run is never mistaken for
-    a finished one. When the candidate set extends a cached one (``sd.donor``), the
-    record-pair features of shared pairs are copied rather than recomputed.
+    a finished one. Columns an earlier version of this candidate set (or the token-view
+    set it extends) already computed are copied; only the rest is computed.
     """
     n = len(sd.rows)
     path = _feature_path(cfg, sd.name, sd.key) if sd.key else None
@@ -453,11 +493,19 @@ def feature_matrix(sd: SplitData, cfg: Config) -> tuple[np.ndarray, list[str]]:
     if path is not None and (cached := _load_features(path)) is not None:
         log.info("%s: cached features %s", sd.name, path.name)
         return cached
-    donor = _donor_source(sd, cfg)
+    src = _reuse_source(sd, cfg) if n else None
+    group_cols = _group_columns(sd) if src is not None else None
+    if src is not None:
+        log.info("%s: reusing cached features (%s) for %d/%d pairs",
+                 sd.name, src[3], int((src[2] >= 0).sum()), n)  # fmt: skip
     out, names = None, []
     for idx in _chunks(n, cfg.scale.feature_chunk):
         with timed(f"{sd.name}: features {idx[0]:,}-{idx[-1]:,} of {n:,}"):
-            x = pair_features(sd, idx) if donor is None else _features_with_donor(sd, idx, donor)
+            x = (
+                pair_features(sd, idx)
+                if src is None
+                else _features_reused(sd, idx, src, group_cols)
+            )
             if out is None:
                 names = list(x.columns)
                 shape = (n, len(names))
