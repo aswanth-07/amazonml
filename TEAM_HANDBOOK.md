@@ -173,8 +173,8 @@ python -m ber.cli run --config src/ber/configs/full.yaml --data-dir DATA --out-d
 - **Compare cross-encoders** on the same held-out pairs (entities no cross-encoder
   trained on) before paying for a full run:
   `PYTHONPATH=src py -3.13 -m ber.crossenc eval --model models/a,models/b --split train --pairs artifacts/ce_eval_pairs.npz`.
-  The file holds the rows, cols and labels of the top-10 token candidates of 60k
-  non-encoder entities.
+  Build the pairs file once with `python scripts/make_ce_eval_pairs.py --blocking artifacts/cache/train_blocking_KEY.joblib`
+  (the top-10 token candidates of 60k non-encoder entities, with labels).
   Current best: `ce-small-v2` (4M pairs, token and embedding-neighbour negatives),
   AUC 0.99985, log-loss 0.0139; `ce-small` (1.5M pairs) scored 0.99970 / 0.0218.
 - **Reuse stage 1** when only stage 2, the cross-encoder or the decision changes:
