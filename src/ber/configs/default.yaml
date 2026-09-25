@@ -110,6 +110,9 @@ scale:                       # the large-scale path used by `ber run` / `ber cv`
   ce_min_p1: 0.02            # cross-encoder scores pairs with stage-1 probability >= this
   ce_wait: 0                 # seconds to wait for a cross-encoder that is still training
   stage1_model: ""           # a previous run's scale_model.joblib whose stage 1 is reused
+  feature_donor_run: ""      # a previous run directory whose cached features are reused
+  drop_s1_share: 0.0         # train only: share of S1 businesses removed (simulates test's orphaned copies)
+  drop_seed: 7
 
 decision:
   strategy: threshold        # threshold | expected_f

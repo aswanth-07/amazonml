@@ -156,7 +156,9 @@ class SplitData:
     extras: dict[str, Any] = field(default_factory=dict)  # split-wide statistics, computed once
 
 
-def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -> SplitData:
+def block_split(
+    s1: Table, pool: Table, cfg: Config, name: str, key: str = "", drop: np.ndarray | None = None
+) -> SplitData:
     """Candidate pairs, their cosines and group context. With a ``key``, the pairs, cosines
     and number matrices are cached, so a rerun skips hashing and search entirely."""
     path = Path(cfg.scale.cache_dir) / f"{name}_blocking_{key}.joblib" if key else None
@@ -176,14 +178,22 @@ def block_split(s1: Table, pool: Table, cfg: Config, name: str, key: str = "") -
                     {"rows": rows, "cols": cols, "base": base, "num_q": mq, "num_d": md}, tmp
                 )
                 tmp.replace(path)
-    donor = None
+    donor = (key, rows, cols) if key else None
+    if drop is not None and drop.any():
+        # businesses removed from Source 1 (a simulation of test's orphaned copies): their
+        # pairs go, their pool copies stay and fall to the next-best suitor below
+        keep = ~drop[rows]
+        rows, cols = rows[keep], cols[keep]
+        base = {k: v[keep] for k, v in base.items()}
+        key = _sha(f"{key}|drop|{int(drop.sum())}|{_sha(str(np.flatnonzero(drop)[:64].tolist()))}") if key else ""  # fmt: skip
     if cfg.scale.emb_dir:
         from ber.embed import embedding_key
 
-        donor = (key, rows, cols) if key else None
-        rows, cols, base = _with_embeddings(s1, pool, cfg, name, rows, cols, base, views)
+        rows, cols, base = _with_embeddings(s1, pool, cfg, name, rows, cols, base, views, drop)
         sc = cfg.scale
         key = _sha(f"{key}|{sc.k_emb}|{sc.k_emb_reverse}|{embedding_key(sc.emb_dir, name)}") if key else ""  # fmt: skip
+    elif drop is None or not drop.any():
+        donor = None  # nothing to extend: the candidate set is the cached one itself
     del views
     with timed(f"{name}: group context"):
         base.update(group_features(rows, cols, base))
@@ -211,17 +221,23 @@ def _sorted(rows: np.ndarray, cols: np.ndarray, base: dict[str, np.ndarray]):
     return rows, cols, {k: v[order] for k, v in base.items()}
 
 
-def _with_embeddings(s1, pool, cfg: Config, name: str, rows, cols, base, views):
+def _with_embeddings(s1, pool, cfg: Config, name: str, rows, cols, base, views, drop=None):
     """Add each entity's best pairs by embedding (and each pool record's best suitor),
-    re-score the new pairs on the token views, and give every pair its ``cos_emb``."""
+    re-score the new pairs on the token views, and give every pair its ``cos_emb``.
+    Businesses in ``drop`` are treated as absent from Source 1: a pool record's best
+    remaining suitor takes their place in the reverse lists."""
     from ber.embed import dense_row_dot, load_embeddings, load_knn
 
     sc = cfg.scale
     knn = load_knn(sc.emb_dir, name, s1.ids, pool.ids)
     fr, fc = knn["fwd_rows"].astype(np.int64), knn["fwd_cols"].astype(np.int64)
     rr, rc = knn["rev_rows"].astype(np.int64), knn["rev_cols"].astype(np.int64)
-    keep_f = group_stats(fr, knn["fwd_sim"].astype(np.float32))[0] < sc.k_emb
-    keep_r = group_stats(rc, knn["rev_sim"].astype(np.float32))[0] < sc.k_emb_reverse
+    fs, rs = knn["fwd_sim"].astype(np.float32), knn["rev_sim"].astype(np.float32)
+    if drop is not None and drop.any():
+        kf, kr = ~drop[fr], ~drop[rr]
+        fr, fc, fs, rr, rc, rs = fr[kf], fc[kf], fs[kf], rr[kr], rc[kr], rs[kr]
+    keep_f = group_stats(fr, fs)[0] < sc.k_emb
+    keep_r = group_stats(rc, rs)[0] < sc.k_emb_reverse
     n_d = len(pool)
     cand = np.unique(np.concatenate([fr[keep_f] * n_d + fc[keep_f], rr[keep_r] * n_d + rc[keep_r]]))
     new = np.setdiff1d(cand, rows.astype(np.int64) * n_d + cols, assume_unique=False)
@@ -442,9 +458,42 @@ def _latest_features(cfg: Config, split: str, key: str, max_version: int):
     return None
 
 
+def _positions(sd: SplitData, d_rows: np.ndarray, d_cols: np.ndarray) -> np.ndarray:
+    """For each pair of ``sd``, its position in the (d_rows, d_cols) list, or -1."""
+    n_d = len(sd.pool)
+    kd = d_rows.astype(np.int64) * n_d + d_cols
+    order = np.argsort(kd, kind="stable")
+    ks = kd[order]
+    kn = sd.rows.astype(np.int64) * n_d + sd.cols
+    at = np.minimum(np.searchsorted(ks, kn), len(ks) - 1)
+    return np.where(ks[at] == kn, order[at], -1)
+
+
+def _run_donor(sd: SplitData, cfg: Config):
+    """A previous run's cached feature matrix for this split, located through the pair list
+    that run saved ({split}_scores.npz, in feature-matrix order)."""
+    run = Path(cfg.scale.feature_donor_run)
+    scores = run / f"{sd.name}_scores.npz"
+    if not scores.exists():
+        return None
+    with np.load(scores) as z:
+        d_rows, d_cols = z["rows"], z["cols"]
+    cache = Path(cfg.scale.cache_dir)
+    for v in range(FEATURE_VERSION, 0, -1):
+        for path in sorted(cache.glob(f"{sd.name}_features_*_v{v}.npy")):
+            loaded = _load_features(path)
+            if loaded is not None and loaded[0].shape[0] == len(d_rows):
+                pos = _positions(sd, d_rows, d_cols)
+                return loaded[0], loaded[1], pos, f"run {run.name}, v{v}"
+    return None
+
+
 def _reuse_source(sd: SplitData, cfg: Config):
-    """(matrix, column names, row in it for each pair or -1, description) from the newest
-    earlier-version matrix of this candidate set, else from the token-view set it extends."""
+    """(matrix, column names, row in it for each pair or -1, description) from, in order:
+    a named earlier run (``scale.feature_donor_run``), the newest earlier-version matrix of
+    this candidate set, or the token-view set it extends."""
+    if cfg.scale.feature_donor_run and (src := _run_donor(sd, cfg)) is not None:
+        return src
     if sd.key and (hit := _latest_features(cfg, sd.name, sd.key, FEATURE_VERSION - 1)):
         v, (feats, names) = hit
         if feats.shape[0] == len(sd.rows):
@@ -456,14 +505,7 @@ def _reuse_source(sd: SplitData, cfg: Config):
     if hit is None or len(d_rows) == 0:
         return None
     v, (feats, names) = hit
-    n_d = len(sd.pool)
-    kd = d_rows.astype(np.int64) * n_d + d_cols
-    order = np.argsort(kd, kind="stable")
-    ks = kd[order]
-    kn = sd.rows.astype(np.int64) * n_d + sd.cols
-    at = np.minimum(np.searchsorted(ks, kn), len(ks) - 1)
-    pos = np.where(ks[at] == kn, order[at], -1)
-    return feats, names, pos, f"token-view pairs, v{v}"
+    return feats, names, _positions(sd, d_rows, d_cols), f"token-view pairs, v{v}"
 
 
 def _features_reused(sd: SplitData, idx: np.ndarray, src, group_cols) -> pd.DataFrame:
@@ -886,8 +928,6 @@ def run(
     # ---- train: block every S1 entity against the whole pool
     s1, pool = load_tables(data_dir, "train", cfg)
     truth = load_split_truth(data_dir)
-    sd = block_split(s1, pool, cfg, "train", split_key(data_dir, "train", cfg))
-    labels, n_true = pair_labels(sd, truth)
     # entities the matcher may learn from and be judged on: all, except those the embedding
     # encoder was fine-tuned on (their embedding similarity is optimistic)
     eligible = np.ones(len(s1), dtype=bool)
@@ -895,6 +935,13 @@ def run(
         from ber.embed import encoder_mask
 
         eligible &= ~encoder_mask(s1.ids)
+    drop = _drop_mask(len(s1), eligible, cfg)
+    if drop is not None:
+        eligible &= ~drop
+        summary["dropped_s1"] = int(drop.sum())
+        log.info("train: %d S1 businesses removed to simulate orphaned copies", int(drop.sum()))
+    sd = block_split(s1, pool, cfg, "train", split_key(data_dir, "train", cfg), drop)
+    labels, n_true = pair_labels(sd, truth)
     summary["train_blocking"] = {
         **sd.stats,
         "eligible_entities": int(eligible.sum()),
@@ -993,6 +1040,21 @@ def run(
     _write_json(run_dir / "metrics.json", summary)
     log.info("run recorded at %s (%.1f min)", run_dir, summary["minutes"])
     return summary
+
+
+def _drop_mask(n: int, eligible: np.ndarray, cfg: Config) -> np.ndarray | None:
+    """S1 positions removed from train to reproduce test's share of orphaned pool copies
+    (test has ~5.75 pool records per S1 against 4.68 in train). Taken from the entities the
+    matcher never trains on or is judged on when there are enough of them."""
+    share = cfg.scale.drop_s1_share
+    if share <= 0:
+        return None
+    k = round(share * n)
+    candidates = np.flatnonzero(~eligible) if (~eligible).sum() >= k else np.arange(n)
+    rng = np.random.default_rng(cfg.scale.drop_seed)
+    drop = np.zeros(n, dtype=bool)
+    drop[rng.choice(candidates, min(k, len(candidates)), replace=False)] = True
+    return drop
 
 
 def _stage_report(sd, probs, labels, n_true, sample, holdout, cfg, iters) -> dict[str, Any]:

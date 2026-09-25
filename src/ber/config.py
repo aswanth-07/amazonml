@@ -162,6 +162,9 @@ class ScaleConfig:
     ce_min_p1: float = 0.02  # pairs scored by the cross-encoder: stage-1 probability >= this
     ce_wait: int = 0  # seconds to wait for a cross-encoder that is still training
     stage1_model: str = ""  # a previous run's scale_model.joblib whose stage 1 is reused
+    feature_donor_run: str = ""  # a previous run directory whose cached features are reused
+    drop_s1_share: float = 0.0  # train only: share of S1 businesses removed (orphan simulation)
+    drop_seed: int = 7
 
 
 @dataclass

@@ -277,6 +277,42 @@ def test_new_feature_group_reuses_older_columns(synthetic_dir, tmp_path: Path, m
 
 
 @pytest.mark.slow
+def test_orphan_simulation_removes_businesses_and_reuses_features(synthetic_dir, tmp_path: Path):
+    from ber.scale import run
+
+    _fake_embeddings(synthetic_dir, tmp_path / "emb")
+    base = [
+        f"scale.cache_dir={(tmp_path / 'cache').as_posix()}",
+        f"scale.emb_dir={(tmp_path / 'emb').as_posix()}",
+        f"artifacts_dir={(tmp_path / 'artifacts').as_posix()}",
+        "scale.train_sample=150", "scale.n_jobs=1", "scale.n_threads=2",
+        "model.n_folds=3", "model.num_boost_round=100", "model.early_stopping_rounds=20",
+    ]  # fmt: skip
+    run(
+        load_config(None, [*base, f"runs_dir={(tmp_path / 'r1').as_posix()}"]),
+        synthetic_dir,
+        tmp_path / "o1",
+    )
+    full_dir = next((tmp_path / "r1").iterdir())
+    summary = run(
+        load_config(None, [*base, f"runs_dir={(tmp_path / 'r2').as_posix()}", "scale.drop_s1_share=0.2",
+                           f"scale.feature_donor_run={full_dir.as_posix()}"]),
+        synthetic_dir, tmp_path / "o2",
+    )  # fmt: skip
+    assert summary["test"]["validation_ok"], summary["test"]["errors"]
+    sim = np.load(next((tmp_path / "r2").iterdir()) / "train_scores.npz")
+    full = np.load(full_dir / "train_scores.npz")
+    assert summary["dropped_s1"] == round(0.2 * len(full["n_true"]))
+    dropped_rows = set(np.unique(full["rows"])) - set(np.unique(sim["rows"]))
+    assert len(dropped_rows) == summary["dropped_s1"]  # every removed business lost all its pairs
+    assert not sim["eligible"][list(dropped_rows)].any()
+    # a pool copy owned by a removed business can still be claimed by another suitor
+    owned = np.isin(full["rows"], list(dropped_rows)) & full["labels"]
+    orphan_cols = set(full["cols"][owned].tolist())
+    assert orphan_cols & set(sim["cols"].tolist())
+
+
+@pytest.mark.slow
 def test_reused_stage1_reproduces_the_run(synthetic_dir, tmp_path: Path):
     from ber.scale import run
 
