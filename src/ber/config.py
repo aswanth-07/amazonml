@@ -166,11 +166,21 @@ class ScaleConfig:
     ce_wait: int = 0  # seconds to wait for a cross-encoder that is still training
     ce_pool_context: bool = False  # cross-encoder rank/gap/margin among a pool record's suitors
     ce_train_all: bool = False  # train: cross-encode every entity's pairs, not only eligible ones
-    ce_band: str = ""  # "lo,hi": models after the first score only pairs whose first-model score is inside
+    ce_band: str = (
+        ""  # "lo,hi": models after the first score only pairs whose first-model score is inside
+    )
     stage1_model: str = ""  # a previous run's scale_model.joblib whose stage 1 is reused
     feature_donor_run: str = ""  # a previous run directory whose cached features are reused
     drop_s1_share: float = 0.0  # train only: share of S1 businesses removed (orphan simulation)
     drop_seed: int = 7
+    # share of eligible entities outside the stage-1/2 sample reserved for training the
+    # listwise reranker (ber.listwise); left out of the holdout. > 0 also writes
+    # lw_groups_train.npz to the run directory
+    lw_share: float = 0.0
+    lw_dump_min_p1: float = 0.002  # pairs in lw_groups_train.npz: stage-1 probability >= this
+    stage2_exclude: str = ""  # stage-2 column families left out, comma-separated (stage2_family)
+    save_stage2: bool = False  # write stage-2 inputs for scripts/stage2_search.py
+    stage2_monotone: bool = False  # stage 2 may only rise with p1 and every model probability
 
 
 @dataclass

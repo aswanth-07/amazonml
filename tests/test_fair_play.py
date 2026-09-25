@@ -46,6 +46,8 @@ EXCEPTIONS = {
     ("embed.py", "transformers"),
     ("crossenc.py", "torch"),
     ("crossenc.py", "transformers"),
+    ("listwise.py", "torch"),
+    ("listwise.py", "transformers"),
 }
 
 

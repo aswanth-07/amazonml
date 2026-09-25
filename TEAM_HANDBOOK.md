@@ -342,6 +342,7 @@ your holdout number when done.
 | H | **Better bi-encoder**: second round with hard negatives mined from its own kNN (ANCE), and/or the larger multilingual-e5-base | the embedding drives 79% of the matcher's gain (section 3b) | **high priority**, open |
 | I | **Orphan simulation**: drop ~19% of train S1 businesses from the candidate set (keep their copies), then train and tune under that condition | the train→test decoy shift (section 3b, point 4) likely explains most of the 0.9645 → 0.947 gap | lead: testing on v3's saved scores |
 | J | **e5-base cross-encoder** (278M, MIT) | stronger pairwise model | lead: training, ETA 18:07 |
+| K | **Listwise group reranker** (`ber.listwise`): one transformer pass over an S1 record and all its uncertain candidates; content-only, so orphans cannot fool it. Plus pool-side context for every scorer in stage 2, a score cache, `stage2_exclude`/`stage2_monotone`, `scripts/stage2_search.py` (every model combination on the holdout) and `scripts/shift_diagnostics.py` (orphans vs extra decoys vs France). Plan and runbook: [docs/v4_listwise.md](docs/v4_listwise.md), `scripts/gpu_runbook.sh` | residual errors are group-level; stage 2's best signal (pool-side competition) is what test's orphans break | branch `listwise-reranker`, (owner) |
 | — | LLM matcher (7-8B) | rejected: tens of pairs per second against millions of uncertain pairs | rejected |
 
 Every run writes `train_scores.npz` (each pair's final probability, label, entity sets

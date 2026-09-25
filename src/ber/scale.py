@@ -24,7 +24,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+import shutil
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -628,20 +631,28 @@ def reuse_folds(path: str | Path, x: pd.DataFrame, groups: np.ndarray, cfg: Conf
     return oof, list(saved.stage1), [int(b.best_iteration) for b in saved.stage1]
 
 
-def fit_folds(x: pd.DataFrame, y: np.ndarray, groups: np.ndarray, cfg: Config, tag: str):
+def fit_folds(
+    x: pd.DataFrame,
+    y: np.ndarray,
+    groups: np.ndarray,
+    cfg: Config,
+    tag: str,
+    monotone: list[int] | None = None,
+):
     """Grouped K-fold LightGBM. Returns (out-of-fold probabilities, fold models, best iterations)."""
     import lightgbm as lgb
 
     folds = group_folds(groups, cfg.model.n_folds, cfg.seed)
     oof = np.zeros(len(x), dtype=np.float32)
     models, iters = [], []
+    extra = {"monotone_constraints": monotone} if monotone and any(monotone) else {}
     for k in range(cfg.model.n_folds):
         tr, va = folds != k, folds == k
         with timed(f"{tag} fold {k + 1}/{cfg.model.n_folds}"):
             dtr = lgb.Dataset(x[tr], label=y[tr], free_raw_data=True)
             dva = lgb.Dataset(x[va], label=y[va], reference=dtr, free_raw_data=True)
             booster = lgb.train(
-                _lgb_params(cfg, cfg.seed + k),
+                {**_lgb_params(cfg, cfg.seed + k), **extra},
                 dtr,
                 num_boost_round=cfg.model.num_boost_round,
                 valid_sets=[dva],
@@ -707,39 +718,155 @@ def cross_scores(
         sel &= only[sd.rows]
     sel = np.flatnonzero(sel)
     pairs = work_dir / f"{sd.name}_ce_pairs.npz"
-    np.savez(pairs, rows=sd.rows[sel], cols=sd.cols[sel])
+    # p1 orders a listwise model's groups; the pairwise scorer ignores it
+    np.savez(pairs, rows=sd.rows[sel], cols=sd.cols[sel], p1=p1[sel].astype(np.float32))
     src = Path(__file__).resolve().parents[1]
     env = {**os.environ, "PYTHONPATH": str(src)}
     out: dict[str, np.ndarray] = {}
     band = [float(x) for x in sc.ce_band.split(",")] if sc.ce_band else None
-    for i, model in enumerate(models):
-        prefix = "ce" if i == 0 else f"ce{i + 1}"
-        todo, todo_pairs = sel, pairs
-        if i > 0 and band is not None:
-            # a slower model scores only the pairs the first one is unsure of; elsewhere its
-            # column repeats the first model's confident score (same rule in train and test)
-            first = out["ce"][sel]
-            todo = sel[(first > band[0]) & (first < band[1])]
-            todo_pairs = work_dir / f"{sd.name}_{prefix}_pairs.npz"
-            np.savez(todo_pairs, rows=sd.rows[todo], cols=sd.cols[todo])
-        done = Path(model) / "crossenc.json"  # written last by ber.crossenc train
+    seen = {"pairwise": 0, "listwise": 0}
+    for model in models:
+        done = Path(model) / "crossenc.json"  # written last by ber.crossenc / ber.listwise train
         waited = 0
         while not done.exists() and waited < sc.ce_wait:  # the model may still be training
             if waited % 300 == 0:
                 log.info("waiting for the cross-encoder at %s (%ds so far)", model, waited)
             time.sleep(30)
             waited += 30
+        kind = scorer_kind(model)
+        seen[kind] += 1
+        stem = "lw" if kind == "listwise" else "ce"
+        prefix = stem if seen[kind] == 1 else f"{stem}{seen[kind]}"
+        module = "ber.listwise" if kind == "listwise" else "ber.crossenc"
         scores = work_dir / f"{sd.name}_{prefix}_scores.npy"
-        cmd = [*shlex.split(sc.ce_python), "-m", "ber.crossenc", "score", "--model", model,
-               "--data-dir", str(data_dir), "--split", sd.name, "--pairs", str(todo_pairs), "--out", str(scores)]  # fmt: skip
-        with timed(f"{sd.name}: cross-encoder {model} on {len(todo):,} pairs"):
-            subprocess.run(cmd, check=True, env=env)
+        todo, todo_pairs = sel, pairs
+        if kind == "pairwise" and prefix != "ce" and band is not None and "ce" in out:
+            # a slower model scores only the pairs the first one is unsure of; elsewhere its
+            # column repeats the first model's confident score (same rule in train and test).
+            # A listwise model reads whole groups, so it always scores every pair.
+            first = out["ce"][sel]
+            todo = sel[(first > band[0]) & (first < band[1])]
+            todo_pairs = work_dir / f"{sd.name}_{prefix}_pairs.npz"
+            np.savez(todo_pairs, rows=sd.rows[todo], cols=sd.cols[todo],
+                     p1=p1[todo].astype(np.float32))  # fmt: skip
+        group = scores.with_name(f"{scores.stem}_grp.npy")  # listwise: P(the entity has a match)
+        # the same model on the same pairs (and, for a listwise model, the same p1 that
+        # groups them) gives the same scores: a later run reuses them instead of rescoring
+        key = _score_key(model, sd.name, sd.rows[todo], sd.cols[todo],
+                         p1[todo] if kind == "listwise" else None)  # fmt: skip
+        cached = Path(sc.cache_dir) / "scores" / f"{sd.name}_{key}.npy"
+        cached_group = cached.with_name(f"{cached.stem}_grp.npy")
+        if cached.exists():
+            log.info("%s: reusing cached %s scores of %s (%s)", sd.name, kind, model, cached.name)
+            shutil.copyfile(cached, scores)
+            if cached_group.exists():
+                shutil.copyfile(cached_group, group)
+        else:
+            cmd = [*shlex.split(sc.ce_python), "-m", module, "score", "--model", model,
+                   "--data-dir", str(data_dir), "--split", sd.name, "--pairs", str(todo_pairs), "--out", str(scores)]  # fmt: skip
+            with timed(f"{sd.name}: {kind} scorer {model} on {len(todo):,} pairs"):
+                subprocess.run(cmd, check=True, env=env)
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(scores, cached.with_suffix(".tmp"))
+            if group.exists():
+                shutil.copyfile(group, cached_group)
+            cached.with_suffix(".tmp").replace(cached)  # last: marks the entry complete
         ce = np.full(len(sd.rows), np.nan, dtype=np.float32)
         if len(todo) < len(sel):
             ce[sel] = out["ce"][sel]
         ce[todo] = np.load(scores).astype(np.float32)
         out[prefix] = ce
+        if group.exists():
+            g = np.full(len(sd.rows), np.nan, dtype=np.float32)
+            g[todo] = np.load(group).astype(np.float32)
+            out[f"{prefix}_grp"] = g
     return out
+
+
+def _score_key(model: str, split: str, rows, cols, p1=None) -> str:
+    """Identify a scorer's output: the model (its path and the crossenc.json its training
+    wrote last, which changes on every retraining) and the exact pairs it scored."""
+    done = Path(model) / "crossenc.json"
+    h = hashlib.sha1(f"{Path(model).resolve()}|{split}".encode())
+    h.update(done.read_bytes() if done.exists() else b"")
+    for a in (rows, cols, p1):
+        if a is not None:
+            h.update(np.ascontiguousarray(a).tobytes())
+    return h.hexdigest()[:16]
+
+
+def stage2_monotone(names: list[str]) -> list[int]:
+    """LightGBM monotone constraints: a higher probability from stage 1 or any cross-encoder
+    or listwise model may only raise the stage-2 probability. Keeps the stack from learning
+    interactions that flip under the train-to-test shift."""
+    return [1 if n == "p1" or re.fullmatch(r"(?:ce|lw)\d*", n) else 0 for n in names]
+
+
+def scorer_kind(model: str | Path) -> str:
+    """The scorer a model directory needs: "listwise" (ber.listwise) or "pairwise" (ber.crossenc)."""
+    done = Path(model) / "crossenc.json"
+    if done.exists():
+        try:
+            return str(json.loads(done.read_text()).get("kind", "pairwise"))
+        except json.JSONDecodeError:
+            return "pairwise"
+    return "pairwise"
+
+
+def scorer_columns(
+    rows: np.ndarray, cols: np.ndarray, arrays: dict[str, np.ndarray], pool_for: set[str]
+) -> dict[str, np.ndarray]:
+    """Stage-2 columns from ``cross_scores``: each score in context of the entity's
+    candidates, and of the pool record's suitors for the prefixes in ``pool_for``; a listwise
+    model also gets the rest of the entity's mass (its expected number of other matches)
+    and its group probability as is."""
+    out: dict[str, np.ndarray] = {}
+    for prefix, v in arrays.items():
+        if prefix.endswith("_grp"):
+            out[prefix] = v
+            continue
+        out.update(ce_columns(rows, v, prefix, cols if prefix in pool_for else None))
+        if prefix.startswith("lw") and len(rows):
+            scored = ~np.isnan(v)
+            mass = np.where(scored, v, 0.0).astype(np.float64)
+            sums = np.bincount(rows, weights=mass, minlength=int(rows.max()) + 1)
+            out[f"{prefix}_rest_s1"] = np.where(scored, sums[rows] - mass, np.nan).astype(
+                np.float32
+            )
+    return out
+
+
+_SCORER = re.compile(r"^((?:ce|lw)\d*)(?:_(.*))?$")
+
+
+def stage2_family(name: str) -> str:
+    """The family of a stage-2 column, the unit ``scale.stage2_exclude`` and
+    ``scripts/stage2_search.py`` switch on and off: "p1" (stage-1 probability in context),
+    "coh" (coherence), a scorer prefix ("ce", "ce2", "lw", ...) with "_pool" for its
+    pool-side context and "_grp" for a listwise group probability, else "keep" (the
+    stage-1 similarities carried over)."""
+    if name == "p1" or name.startswith("p1_"):
+        return "p1"
+    if name in ("coh_emb", "partner_p1"):
+        return "coh"
+    m = _SCORER.match(name)
+    if m:
+        prefix, rest = m.group(1), m.group(2) or ""
+        if rest.endswith("_pool"):
+            return f"{prefix}_pool"
+        if rest == "grp":
+            return f"{prefix}_grp"
+        return prefix
+    return "keep"
+
+
+def _stage2_names(columns: dict[str, np.ndarray], cfg: Config) -> list[str]:
+    excluded = {s.strip() for s in cfg.scale.stage2_exclude.split(",") if s.strip()}
+    return [n for n in columns if stage2_family(n) not in excluded]
+
+
+def _uses_scorers(names: list[str]) -> bool:
+    return any(_SCORER.match(n) for n in names)
 
 
 def coherence_columns(
@@ -956,16 +1083,8 @@ def run(
     # ---- train: block every S1 entity against the whole pool
     s1, pool = load_tables(data_dir, "train", cfg)
     truth = load_split_truth(data_dir)
-    # entities the matcher may learn from and be judged on: all, except those the embedding
-    # encoder was fine-tuned on (their embedding similarity is optimistic)
-    eligible = np.ones(len(s1), dtype=bool)
-    if cfg.scale.emb_dir:
-        from ber.embed import encoder_mask
-
-        eligible &= ~encoder_mask(s1.ids)
-    drop = _drop_mask(len(s1), eligible, cfg)
+    eligible, drop = train_entities(s1.ids, cfg)
     if drop is not None:
-        eligible &= ~drop
         summary["dropped_s1"] = int(drop.sum())
         log.info("train: %d S1 businesses removed to simulate orphaned copies", int(drop.sum()))
     sd = block_split(s1, pool, cfg, "train", split_key(data_dir, "train", cfg), drop)
@@ -979,12 +1098,10 @@ def run(
     _write_json(run_dir / "metrics.json", summary)
 
     # ---- stage 1 on a sample of entities; every other eligible entity is an untouched holdout
-    rng = np.random.default_rng(cfg.seed)
-    pick = np.flatnonzero(eligible)
-    sample = np.sort(rng.choice(pick, min(cfg.scale.train_sample, len(pick)), replace=False))
-    in_sample = np.zeros(len(s1), dtype=bool)
-    in_sample[sample] = True
-    holdout = np.flatnonzero(eligible & ~in_sample)
+    # (minus the listwise share, which trains ber.listwise)
+    sample, in_sample, lw, holdout = split_entities(s1.ids, eligible, cfg)
+    if lw.any():
+        summary["listwise_share"] = int(lw.sum())
     sidx = np.flatnonzero(in_sample[sd.rows])
     feats, feature_names = feature_matrix(sd, cfg)
     with timed("train: sample features"):
@@ -1005,16 +1122,24 @@ def run(
     sd.base = {"score": sd.base["score"]}  # group context no longer needed; free it
     summary["stage1"] = _stage_report(sd, p1, labels, n_true, sample, holdout, cfg, iters1)
     _write_json(run_dir / "metrics.json", summary)
+    if lw.any():  # training groups for ber.listwise (and its validation on holdout entities)
+        dump_listwise_groups(run_dir / "lw_groups_train.npz", sd, p1, labels, n_true, lw,
+                             holdout, cfg)  # fmt: skip
     final_p, stage2, s2_names, thr = p1, [], [], summary["stage1"]["threshold"]
 
-    # ---- cross-encoder on uncertain pairs of entities it was not trained on
+    # ---- cross-encoders on uncertain pairs of entities they were not trained on
     # scoring every suitor (not only eligible entities') makes pool-side competition in
     # training look like test, where every suitor is scored
     ce_only = None if cfg.scale.ce_train_all else eligible
-    for prefix, ce in cross_scores(sd, cfg, p1, data_dir, run_dir, only=ce_only).items():
-        keep.update(ce_columns(sd.rows, ce, prefix, sd.cols if cfg.scale.ce_pool_context else None))
-        summary["cross_encoder_pairs"] = int((~np.isnan(ce)).sum())
-        del ce
+    scored = cross_scores(sd, cfg, p1, data_dir, run_dir, only=ce_only)
+    for prefix, ce in scored.items():
+        if not prefix.endswith("_grp"):
+            summary.setdefault("scored_pairs", {})[prefix] = int((~np.isnan(ce)).sum())
+    if scored:
+        summary["cross_encoder_pairs"] = int((~np.isnan(next(iter(scored.values())))).sum())
+    pool_for = set(scored) if cfg.scale.ce_pool_context else set()
+    keep.update(scorer_columns(sd.rows, sd.cols, scored, pool_for))
+    del scored
     if cfg.scale.emb_dir:
         with timed("train: coherence"):
             keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))
@@ -1023,10 +1148,14 @@ def run(
     if cfg.scale.stage2:
         cols2 = stage2_columns(sd.rows, sd.cols, p1, keep)
         del keep
-        s2_names = list(cols2)
+        if cfg.scale.save_stage2:
+            save_stage2_inputs(run_dir, sd, cols2, p1, labels, n_true, eligible, in_sample, lw,
+                               holdout, cfg)  # fmt: skip
+        s2_names = _stage2_names(cols2, cfg)
         oof2, stage2, iters2 = fit_folds(
-            _frame(cols2, sidx, s2_names), ys, sd.rows[sidx], cfg, "stage2"
-        )
+            _frame(cols2, sidx, s2_names), ys, sd.rows[sidx], cfg, "stage2",
+            monotone=stage2_monotone(s2_names) if cfg.scale.stage2_monotone else None,
+        )  # fmt: skip
         p2 = predict_columns(stage2, cols2, s2_names, len(sd.rows), cfg.scale.feature_chunk)
         p2[sidx] = oof2
         del cols2
@@ -1048,11 +1177,13 @@ def run(
             sd.rows, adjusted(sd, final_p, cfg), labels, n_true, sample, holdout, cfg.beta
         )
     _write_json(run_dir / "metrics.json", summary)
-    _report_train(sd, final_p, rule, truth, cfg, run_dir, summary, eligible)
-    # every pair's final probability, for tuning decision rules offline
+    _report_train(sd, final_p, rule, truth, cfg, run_dir, summary, eligible & ~lw)
+    # every pair's final probability, for tuning decision rules offline (``eligible`` leaves
+    # out the listwise share, whose listwise scores are in-sample)
     np.savez(
         run_dir / "train_scores.npz", rows=sd.rows, cols=sd.cols, p=final_p, labels=labels,
-        n_true=n_true, eligible=eligible, in_sample=in_sample, country=s1.country.astype("U"),
+        n_true=n_true, eligible=eligible & ~lw, in_sample=in_sample, lw_share=lw,
+        country=s1.country.astype("U"),
     )  # fmt: skip
     model = TrainedModel(
         stage1, stage2, feature_names, s2_names, thr, cfg.to_dict(),
@@ -1071,6 +1202,106 @@ def run(
     _write_json(run_dir / "metrics.json", summary)
     log.info("run recorded at %s (%.1f min)", run_dir, summary["minutes"])
     return summary
+
+
+def train_entities(s1_ids: np.ndarray, cfg: Config) -> tuple[np.ndarray, np.ndarray | None]:
+    """(eligible, drop) over train Source 1 positions. Eligible: the entities the matcher may
+    learn from and be judged on, i.e. all except those the embedding encoder was fine-tuned
+    on (their embedding similarity is optimistic) and those removed to simulate orphans."""
+    eligible = np.ones(len(s1_ids), dtype=bool)
+    if cfg.scale.emb_dir:
+        from ber.embed import encoder_mask
+
+        eligible &= ~encoder_mask(s1_ids)
+    drop = _drop_mask(len(s1_ids), eligible, cfg)
+    if drop is not None:
+        eligible &= ~drop
+    return eligible, drop
+
+
+def listwise_mask(s1_ids: np.ndarray, candidates: np.ndarray, share: float) -> np.ndarray:
+    """The listwise share: ``share`` of the boolean ``candidates`` (eligible entities outside
+    the stage-1/2 sample), picked by a fixed hash of the id, so every run agrees on it."""
+    out = np.zeros(len(s1_ids), dtype=bool)
+    if share <= 0:
+        return out
+    cut = int(share * 1_000_000)
+    idx = np.flatnonzero(candidates)
+    out[idx] = np.fromiter(
+        (zlib.crc32(f"lw|{s1_ids[i]}".encode()) % 1_000_000 < cut for i in idx), bool, len(idx)
+    )
+    return out
+
+
+def split_entities(s1_ids: np.ndarray, eligible: np.ndarray, cfg: Config):
+    """(sample, in_sample, listwise share, holdout): the stage-1/2 sample is drawn from the
+    eligible entities, the listwise share (``scale.lw_share``) from the rest, and the holdout
+    is what remains, so no model's score on a holdout entity is in-sample."""
+    rng = np.random.default_rng(cfg.seed)
+    pick = np.flatnonzero(eligible)
+    sample = np.sort(rng.choice(pick, min(cfg.scale.train_sample, len(pick)), replace=False))
+    in_sample = np.zeros(len(s1_ids), dtype=bool)
+    in_sample[sample] = True
+    lw = listwise_mask(s1_ids, eligible & ~in_sample, cfg.scale.lw_share)
+    holdout = np.flatnonzero(eligible & ~in_sample & ~lw)
+    return sample, in_sample, lw, holdout
+
+
+def dump_listwise_groups(
+    path: Path,
+    sd: SplitData,
+    p1: np.ndarray,
+    labels: np.ndarray,
+    n_true: np.ndarray,
+    lw: np.ndarray,
+    holdout: np.ndarray,
+    cfg: Config,
+) -> None:
+    """The pairs ``ber.listwise train`` learns from (listwise share) and validates on
+    (holdout), with stage-1 probability >= ``scale.lw_dump_min_p1``: rows, cols, p1,
+    labels, every entity's true-match count, and the two entity masks."""
+    valid = np.zeros(len(sd.s1), dtype=bool)
+    valid[holdout] = True
+    sel = (lw | valid)[sd.rows] & (p1 >= cfg.scale.lw_dump_min_p1)
+    with timed(f"write {path.name} ({int(sel.sum()):,} pairs)"):
+        np.savez(path, rows=sd.rows[sel], cols=sd.cols[sel], p1=p1[sel].astype(np.float32),
+                 labels=labels[sel], n_true=n_true, train=lw, valid=valid)  # fmt: skip
+
+
+def save_stage2_inputs(
+    run_dir: Path,
+    sd: SplitData,
+    cols2: dict[str, np.ndarray],
+    p1: np.ndarray,
+    labels: np.ndarray,
+    n_true: np.ndarray,
+    eligible: np.ndarray,
+    in_sample: np.ndarray,
+    lw: np.ndarray,
+    holdout: np.ndarray,
+    cfg: Config,
+    min_p1: float = 0.001,
+) -> None:
+    """Every stage-2 column of the pairs with p1 >= ``min_p1`` (the others are ~0 after
+    stage 2), for ``scripts/stage2_search.py``: stage2_inputs.npy (memory-mapped float32)
+    with its column names in stage2_inputs.json, and stage2_meta.npz with the pairs, labels
+    and entity masks."""
+    idx = np.flatnonzero(p1 >= min_p1)
+    names = list(cols2)
+    path = run_dir / "stage2_inputs.npy"
+    with timed(f"write stage-2 inputs ({len(idx):,} pairs x {len(names)} columns)"):
+        mat = np.lib.format.open_memmap(path, "w+", np.float32, (len(idx), len(names)))
+        for s in range(0, len(idx), 1_000_000):
+            part = idx[s : s + 1_000_000]
+            mat[s : s + len(part)] = np.column_stack([cols2[n][part] for n in names])
+        mat.flush()
+        del mat
+        hold = np.zeros(len(sd.s1), dtype=bool)
+        hold[holdout] = True
+        np.savez(run_dir / "stage2_meta.npz", idx=idx, rows=sd.rows[idx], cols=sd.cols[idx],
+                 labels=labels[idx], n_true=n_true, eligible=eligible, in_sample=in_sample,
+                 lw_share=lw, holdout=hold, n_folds=cfg.model.n_folds, seed=cfg.seed)  # fmt: skip
+        (run_dir / "stage2_inputs.json").write_text(json.dumps(names))
 
 
 def _drop_mask(n: int, eligible: np.ndarray, cfg: Config) -> np.ndarray | None:
@@ -1202,11 +1433,11 @@ def predict_split(
     if model.stage2:
         cand_score = sd.base["score"]
         sd.base = {"score": cand_score}
-        if "ce" in model.stage2_names:
-            for prefix, ce in cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir)).items():
-                pool_ctx = sd.cols if f"{prefix}_rank_pool" in model.stage2_names else None
-                keep.update(ce_columns(sd.rows, ce, prefix, pool_ctx))
-                del ce
+        if _uses_scorers(model.stage2_names):
+            scored = cross_scores(sd, cfg, p1, data_dir, Path(save_to or out_dir))
+            pool_for = {k for k in scored if f"{k}_rank_pool" in model.stage2_names}
+            keep.update(scorer_columns(sd.rows, sd.cols, scored, pool_for))
+            del scored
         if "coh_emb" in model.stage2_names:
             keep.update(coherence_columns(sd.rows, sd.cols, p1, _pool_embeddings(sd, cfg)))
         cols2 = stage2_columns(sd.rows, sd.cols, p1, keep)

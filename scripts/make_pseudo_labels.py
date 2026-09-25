@@ -46,7 +46,9 @@ def main() -> int:
     for run in args.run[1:]:
         r2, c2, p2, _ = _load(run)
         if len(r2) != len(rows) or not (np.array_equal(r2, rows) and np.array_equal(c2, cols)):
-            raise SystemExit(f"{run}: a different test candidate set; agreement needs the same pairs")
+            raise SystemExit(
+                f"{run}: a different test candidate set; agreement needs the same pairs"
+            )
         np.minimum(lo, p2, out=lo)
         np.maximum(hi, p2, out=hi)
     country = (
@@ -78,7 +80,9 @@ def main() -> int:
         f"{args.country}: {n_ent:,} businesses, {len(args.run)} run(s); {len(pos):,} "
         f"pseudo-positives, {len(neg):,} hard pseudo-negatives -> {args.out}"
     )
-    print("pairs left out as uncertain in some run:", int(((lo < args.pos) & (hi > args.neg)).sum()))
+    print(
+        "pairs left out as uncertain in some run:", int(((lo < args.pos) & (hi > args.neg)).sum())
+    )
     return 0
 
 

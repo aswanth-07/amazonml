@@ -116,6 +116,11 @@ scale:                       # the large-scale path used by `ber run` / `ber cv`
   feature_donor_run: ""      # a previous run directory whose cached features are reused
   drop_s1_share: 0.0         # train only: share of S1 businesses removed (simulates test's orphaned copies)
   drop_seed: 7
+  lw_share: 0.0              # share of eligible non-sample entities that trains ber.listwise (left out of the holdout); > 0 writes lw_groups_train.npz
+  lw_dump_min_p1: 0.002      # pairs in lw_groups_train.npz: stage-1 probability >= this
+  stage2_exclude: ""         # comma-separated stage-2 column families left out (see scale.stage2_family)
+  save_stage2: false         # write stage-2 inputs for scripts/stage2_search.py
+  stage2_monotone: false     # stage 2 may only rise with p1 and every cross-encoder / listwise probability
 
 decision:
   strategy: threshold        # threshold | expected_f
