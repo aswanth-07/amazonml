@@ -15,7 +15,9 @@ so the model can be trained on any machine with the dataset.
   same address, rebrands), ranked by how many rare tokens they share and whether the
   house number agrees; each entity keeps a random 0-7 of the best, so groups vary in size
   and difficulty as the p1 >= ``ce_min_p1`` groups of a run do.
-- ``p1``: a proxy >= 0.05 (the ranking above), so every dumped pair enters the group.
+- ``p1``: a proxy >= 0.05 (the ranking above; 0.9 for true copies), so every dumped pair
+  enters the group. It orders groups only; the models never read it. The file is marked
+  ``p1_proxy`` so ``ber.listwise eval`` does not treat it as a stage-1 baseline.
 
 ``--side pool`` (C7) builds the mirror image: groups keyed on pool records, each with its
 true owner and its best other Source 1 suitors, suitors drawn from the encoder share only
@@ -306,7 +308,7 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out, rows=rows[order].astype(np.int64), cols=cols[order].astype(np.int64),
              p1=p1[order], labels=labels[order], n_true=n_true, train=train, valid=valid,
-             side=np.array(args.side))  # fmt: skip
+             side=np.array(args.side), p1_proxy=np.array(True))  # fmt: skip
     per = np.bincount(keys, minlength=len(train))[np.flatnonzero(train | valid)]
     log.info("%s (%s side): %d pairs (%.1f%% positive), %.2f per key (max %d); %d train, "
              "%d valid keys; %.0fs", out, args.side, len(rows), 100 * labels.mean(), per.mean(),

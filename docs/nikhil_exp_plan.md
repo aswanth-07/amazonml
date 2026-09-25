@@ -47,7 +47,11 @@ Data facts found tonight (train, measured):
   (tested), so train caches stay valid. **Delete `artifacts/cache/test_*`** before the run
   that should use it, or test keeps the old tables.
 
-## 3. Task for Nambi Rajan (due 26 Sep 14:00 IST, before v6)
+## 3. Task for Nambi Rajan
+
+**Now one command:** `python scripts/run_all.py --data-dir PATH/TO/dataset` does everything
+below and more (v5's recipe from scratch + v6's models), sized to the machine; see
+[RUN_NAMBI.md](../RUN_NAMBI.md). The manual steps stay here for reference.
 
 Machine: any Linux/Windows box with a CUDA GPU ≥ 12 GB and ≥ 32 GB RAM (the lead's
 laptop class). The group builders are CPU-only, about 6-10 GB of RAM.
@@ -65,8 +69,10 @@ export DATA=student_resource/dataset PY=python   # Windows: PY="py -3.13" as the
    `bash scripts/gpu_runbook.sh groups` and `bash scripts/gpu_runbook.sh pgroups`.
 3. **Train C1** (~30-60 min on a 16 GB GPU, small backbone):
    `LW_INIT=models/ce-small-v2 bash scripts/gpu_runbook.sh lw`
-   then `bash scripts/gpu_runbook.sh lweval`. Gate: `lw` AUC within 0.0002 of the CE's,
-   and `blend:lw+p1` above `blend:ce+p1` on the macro proxy.
+   then `bash scripts/gpu_runbook.sh lweval`. Gate: `blend:lw:lw+ce:ce-small` above
+   `ce:ce-small` on the macro proxy (the listwise model adds to the cross-encoder). The raw
+   groups' p1 is a proxy, so no stage-1 row is reported; the real test is run C's stage-2
+   search with and without the listwise families.
 4. **Train C7**: `LW_INIT=models/ce-small-v2 bash scripts/gpu_runbook.sh lwp`
    then `bash scripts/gpu_runbook.sh lwpeval`. Gate: `lwp` owner accuracy above the CE's.
 5. **Measure against v5** (on the lead's machine, which has v5's caches; or copy

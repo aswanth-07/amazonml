@@ -131,7 +131,8 @@ On Linux, always pass `--set scale.ce_python=python` (the default `py -3.13` is 
    If `s1_crowd` rises instead, the extra records are near decoys: keep `DROP=0`, and let
    the listwise model and a stricter decision handle them.
 2. **`lweval`** (60k holdout entities): the listwise pair AUC should be within 0.0002 of the
-   CE's (≈0.9998), and `blend:lw+p1` should beat `blend:ce+p1` on the macro proxy. If it
+   CE's (≈0.9998), and its blend with stage 1 (`blend:...+stage1_p1`, groups from a run) or
+   with the CE (`blend:...+ce:...`, groups from `make_lw_groups.py`) should beat the CE alone on the macro proxy. If it
    loses on both, stop spending on the listwise model and ship the CE stack with pool-side
    context.
 3. **`runB`**: stage-2 holdout against run A's and against the lead's v3. Submit only what

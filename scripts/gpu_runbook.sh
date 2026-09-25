@@ -121,7 +121,7 @@ lw)
 lweval)
   $PY -m ber.listwise eval --data-dir "$DATA" --groups "$(groups_file)" \
       --model "$LW_MODEL" --ce "$CE_MODEL" --max-entities 60000 | tee "runs/lweval_$(basename "$LW_MODEL").json"
-  echo "gate: lw auc >= ce auc - 0.0002, and blend:lw+p1 macro_f05_proxy > blend:ce+p1 -> keep it"
+  echo "gate: the blend of lw with the CE above the CE alone (macro_f05_proxy) -> keep it"
   ;;
 pgroups)
   $PY scripts/make_lw_groups.py --data-dir "$DATA" --out artifacts/lwp_groups_enc.npz --side pool \
@@ -137,7 +137,7 @@ lwp)
 lwpeval)
   $PY -m ber.listwise eval --data-dir "$DATA" --groups artifacts/lwp_groups_enc.npz \
       --model "$LWP_MODEL" --ce "$CE_MODEL" --max-entities 60000 | tee "runs/lwpeval_$(basename "$LWP_MODEL").json"
-  echo "gate: lwp owner_accuracy above the CE's and the blend's -> keep it"
+  echo "gate: lwp (or its blend with the CE) owner_accuracy above the CE alone -> keep it"
   ;;
 runB)
   RUN_A=$(latest_run A)

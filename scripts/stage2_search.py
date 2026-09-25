@@ -77,6 +77,7 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=0.08)
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--only", default="", help="evaluate just this comma-separated family set")
+    ap.add_argument("--out", default="", help="results TSV (default: <run>/stage2_search.tsv)")
     ap.add_argument("--max-sample", type=int, default=0,
                     help="train and tune on this many sample entities (screening); holdout unchanged")  # fmt: skip
     args = ap.parse_args()
@@ -103,6 +104,15 @@ def main() -> int:
     cfg_params = {"objective": "binary", "learning_rate": args.lr, "num_leaves": 127,
                   "min_data_in_leaf": 200, "feature_fraction": 0.7, "bagging_fraction": 0.7,
                   "bagging_freq": 1, "lambda_l2": 1.0, "max_bin": 127}  # fmt: skip
+    if (run / "config.yaml").exists():  # the parameters the run's own stage 2 used
+        from ber.config import load_config
+
+        cfg_params.update(load_config(run / "config.yaml").model.params)
+    # a leaf needs this many rows: on a small sample (with 70% bagging) the run's value can
+    # forbid every split and leave a constant model; at full scale it is unchanged
+    n_train = int(train_mask.sum()) * (n_folds - 1) // n_folds
+    cfg_params["min_data_in_leaf"] = min(int(cfg_params.get("min_data_in_leaf", 200)),
+                                         max(20, n_train // 50))  # fmt: skip
     if args.threads:
         cfg_params["num_threads"] = args.threads
 
@@ -173,7 +183,7 @@ def main() -> int:
             evaluate(fams, monotone=False, bags=args.bags)
 
     table = pd.DataFrame(results).sort_values("holdout", ascending=False)
-    table.to_csv(run / "stage2_search.tsv", sep="\t", index=False)
+    table.to_csv(args.out or run / "stage2_search.tsv", sep="\t", index=False)
     with pd.option_context("display.max_colwidth", 60, "display.width", 200):
         print(table[["families", "monotone", "bags", "n_features", "holdout", "sample_oof", "rule",
                      "mean_best_iter"]].to_string(index=False))  # fmt: skip

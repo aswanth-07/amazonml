@@ -4,7 +4,7 @@ Read this first, whether you are a teammate or an agent working for one. It says
 what the task is, what has been built, what it scores, how to run it, what was
 learned, and which open directions are free for a branch to take.
 
-Last updated 2026-09-26 01:10 IST.
+Last updated 2026-09-26 01:40 IST.
 
 ---
 
@@ -54,21 +54,25 @@ and training groups built from the raw data on the encoder share, so the holdout
 v5's. Steps 2-4 (training and measuring) moved to Nambi below: Nikhil's laptop cannot run
 them. Plan and evidence: [docs/nikhil_exp_plan.md](docs/nikhil_exp_plan.md).
 
-### Nambi Rajan: train and measure C1 + C7 on `nikhil_exp`, due 26 Sep 14:00 IST
+### Nambi Rajan: run v6 end to end on `nikhil_exp` (one command)
 
-Full steps and commands: [docs/nikhil_exp_plan.md](docs/nikhil_exp_plan.md), section 3.
+Everything is on `nikhil_exp`: **[RUN_NAMBI.md](RUN_NAMBI.md)**. With the dataset and an NVIDIA
+GPU, from a fresh Python 3.10-3.13 venv:
 
-1. `git switch nikhil_exp`; get `models/ce-small-v2` from the lead as the init.
-2. Groups from the raw data (CPU): `bash scripts/gpu_runbook.sh groups` and `pgroups`.
-3. Train and gate C1: `LW_INIT=models/ce-small-v2 bash scripts/gpu_runbook.sh lw`, then `lweval`.
-4. Train and gate C7: `LW_INIT=models/ce-small-v2 bash scripts/gpu_runbook.sh lwp`, then `lwpeval`.
-5. With the lead (v5's caches): v5 + `scale.ce_model=<v5 CEs>,models/lw-small,models/lwp-small`
-   + `scale.stage1_model=<v5 run>` + `scale.save_stage2=true` + `scale.drop_s1_share=0.186`
-   + `scale.ce_train_all=true` (C7 needs every suitor scored in train, as in test);
-   `scripts/stage2_search.py` with and without the `lw*`/`lwp*` families.
-6. Report the holdout macro F0.5 with and without each model in section 2. The French
-   normalisation is a public-LB A/B only (delete `artifacts/cache/test_*` first); upload
-   only after telling the lead.
+```bash
+git switch nikhil_exp
+python scripts/run_all.py --data-dir PATH/TO/dataset
+```
+
+It installs everything (PyTorch built for the driver's CUDA), measures the machine (GPU and
+free memory, bf16, CPU threads, RAM, disk) and sizes every batch and sample from it, then
+runs v5's recipe from scratch plus v6's new models: embeddings, runs A and B, the
+cross-encoder, French pseudo-labels, the France-adapted cross-encoder (gated), C1 and C7,
+run C with source fingerprints, the stage-2 search with and without C1/C7, and the final
+submission. It is resumable and retries a step at half the batch when the GPU runs out of
+memory. Results: `runs/v6/RESULTS.md`; submission: `output-final/matching_results.tsv`
+(validated). About 14-17 h on a 16 GB GPU laptop. Upload only after telling the lead;
+copy the holdout numbers into section 2.
 
 ---
 

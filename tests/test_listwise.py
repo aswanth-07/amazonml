@@ -164,7 +164,7 @@ def test_tiny_listwise_model_trains_and_scores_every_pair(synthetic_dir, tmp_pat
     ones = pd.Series(gp.astype(np.float32)).groupby(rows).nunique()
     assert (ones == 1).all()  # one group probability per entity
     report = listwise.evaluate_models(groups, synthetic_dir, [str(out)], [], max_entities=100)
-    assert {"stage1_p1", "lw:lw", "blend:lw:lw+p1"} <= set(report)
+    assert {"stage1_p1", "lw:lw", "blend:lw:lw+stage1_p1"} <= set(report)
     one = rows == rows[0]  # a single entity: one group
     pp1, gp1 = listwise.score(out, synthetic_dir, "train", rows[one], cols[one], p1[one], workers=0)
     assert not np.isnan(pp1).any() and not np.isnan(gp1).any()

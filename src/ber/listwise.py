@@ -722,7 +722,9 @@ def evaluate_models(
     ents = np.sort(rng.choice(held, min(max_entities, len(held)), replace=False))
     sel = np.isin(keys, ents) & (p1 >= min_p1)
     r, c, q, y = rows[sel], cols[sel], p1[sel].astype(np.float32), labels[sel]
-    scores = {"stage1_p1": q}
+    # groups from scripts/make_lw_groups.py carry a label-derived p1 proxy: not a baseline
+    proxy = bool(z["p1_proxy"]) if "p1_proxy" in z.files else False
+    scores = {} if proxy else {"stage1_p1": q}
     for m in ce_models:
         scores[f"ce:{Path(m).name}"] = ce_score(m, data_dir, "train", r, c).astype(np.float32)
     for m in lw_models:
@@ -730,9 +732,11 @@ def evaluate_models(
         scores[f"lw:{Path(m).name}"] = pp.astype(np.float32)
     logit = {k: np.log(np.clip(v, 1e-4, 1 - 1e-4) / (1 - np.clip(v, 1e-4, 1 - 1e-4)))
              for k, v in scores.items()}  # fmt: skip
+    anchor = next((k for k in scores if k.startswith("ce:")), None) if proxy else "stage1_p1"
     for k in list(scores):
-        if k != "stage1_p1":
-            scores[f"blend:{k}+p1"] = 1 / (1 + np.exp(-(logit[k] + logit["stage1_p1"]) / 2))
+        if anchor is not None and k != anchor and not (proxy and k.startswith("ce:")):
+            # the mean-logit blend: does the model add to what the anchor already knows?
+            scores[f"blend:{k}+{anchor}"] = 1 / (1 + np.exp(-(logit[k] + logit[anchor]) / 2))
     report = {}
     for k, v in scores.items():
         if side == "pool":

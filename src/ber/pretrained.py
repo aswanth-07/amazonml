@@ -29,6 +29,7 @@ REGISTRY: dict[str, ModelInfo] = {
     "intfloat/multilingual-e5-base": ModelInfo("MIT", 278_000_000, "multilingual"),
     "BAAI/bge-small-en-v1.5": ModelInfo("MIT", 33_000_000, "English only"),
     "BAAI/bge-m3": ModelInfo("MIT", 568_000_000, "multilingual, 8k context"),
+    "BAAI/bge-reranker-v2-m3": ModelInfo("Apache-2.0", 568_000_000, "multilingual reranker"),
     "sentence-transformers/all-MiniLM-L6-v2": ModelInfo("Apache-2.0", 23_000_000, "English only"),
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": ModelInfo(
         "Apache-2.0", 118_000_000, "multilingual"

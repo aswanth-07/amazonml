@@ -5,6 +5,7 @@ find all Source 2 and Source 3 records that describe the same real-world
 business. Scoring is macro F0.5 per Source 1 entity, singletons included.
 
 **Team members and their agents: start with [TEAM_HANDBOOK.md](TEAM_HANDBOOK.md)**.
+To run the full v6 pipeline on one machine with one command: [RUN_NAMBI.md](RUN_NAMBI.md).
 It has the current scores, how to run each version, what the data taught us, and
 the open directions to branch on.
 
