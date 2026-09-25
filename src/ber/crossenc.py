@@ -74,7 +74,12 @@ def train(
     batch: int = 256,
     lr: float = 3e-5,
     seed: int = 42,
+    knn: str | Path | None = None,
+    n_neg_knn: int = 3,
 ) -> Path:
+    """``knn``: the embedding kNN lists of train (``ber.embed``); each entity's best
+    ``n_neg_knn`` wrong neighbours join the token-blocking negatives, so the cross-encoder
+    also learns the confusions the embedding view brings into the candidate set."""
     import joblib
     import torch
     from transformers import AutoTokenizer
@@ -87,17 +92,25 @@ def train(
     owner[b] = a
     enc = encoder_mask(s1[schema.ENTITY_ID].to_numpy())
 
+    def hardest(r, col, sc, k):
+        """Each encoder-share entity's k highest-scoring wrong candidates."""
+        neg = (owner[col] != r) & enc[r]
+        r, col, sc = r[neg], col[neg], sc[neg]
+        order = np.lexsort((-sc, r))
+        r, col = r[order], col[order]
+        rank = np.arange(len(r)) - np.searchsorted(r, r)
+        return r[rank < k], col[rank < k]
+
     c = joblib.load(blocking)
-    r, col, sc = c["rows"].astype(np.int64), c["cols"].astype(np.int64), c["base"]["score"]
+    neg_r, neg_c = hardest(c["rows"].astype(np.int64), c["cols"].astype(np.int64),
+                           c["base"]["score"], n_neg)  # fmt: skip
     del c
-    neg = (owner[col] != r) & enc[r]
-    r, col, sc = r[neg], col[neg], sc[neg]
-    order = np.lexsort((-sc, r))
-    r, col = r[order], col[order]
-    start = np.searchsorted(r, r)
-    rank = np.arange(len(r)) - start
-    keep = rank < n_neg
-    neg_r, neg_c = r[keep], col[keep]
+    if knn:
+        with np.load(knn) as z:
+            kr, kc = hardest(z["fwd_rows"].astype(np.int64), z["fwd_cols"].astype(np.int64),
+                             z["fwd_sim"].astype(np.float32), n_neg_knn)  # fmt: skip
+        key = np.unique(np.concatenate([neg_r * len(pool) + neg_c, kr * len(pool) + kc]))
+        neg_r, neg_c = key // len(pool), key % len(pool)
     pos = enc[a]
     pos_r, pos_c = a[pos], b[pos]
     rows = np.concatenate([pos_r, neg_r])
@@ -210,11 +223,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", help="score: output .npy of float16 probabilities")
     ap.add_argument("--max-pairs", type=int, default=1_500_000)
     ap.add_argument("--n-neg", type=int, default=4)
+    ap.add_argument("--knn", help="train: embedding kNN lists (npz) for extra hard negatives")
+    ap.add_argument("--n-neg-knn", type=int, default=3)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")  # fmt: skip
     if args.command == "train":
-        train(args.data_dir, args.init, args.blocking, args.model, args.n_neg, args.max_pairs)
+        train(args.data_dir, args.init, args.blocking, args.model, args.n_neg, args.max_pairs,
+              knn=args.knn, n_neg_knn=args.n_neg_knn)  # fmt: skip
     else:
         with np.load(args.pairs) as z:
             rows, cols = z["rows"], z["cols"]
