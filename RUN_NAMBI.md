@@ -14,6 +14,13 @@ git switch nikhil_exp
 
 (Already cloned: `git fetch origin && git switch nikhil_exp && git pull`.)
 
+**Already started a run on an older commit?** The branch now has the data-audit fixes
+(`docs/data_audit.md`). Either let the running job finish without pulling, or pull and
+restart the runs with `python scripts/run_all.py --data-dir ... --from runA` so every run
+uses the new settings. The embedding step can stay; the steps from runA on are redone.
+A plain rerun after pulling keeps the settings the run started with, but the normaliser
+change makes it rebuild its caches.
+
 ## 2. Make a Python 3.10-3.13 environment
 
 Windows (PowerShell):
@@ -58,15 +65,31 @@ profile it chose, and runs these steps:
 | 17 | runC | v6: France CE + C1 + C7 + source fingerprints | CPU+GPU | 2-2.5 h |
 | 18 | search | every stage-2 family on the holdout, with and without C1/C7 | CPU | 1-2 h |
 | 19 | final | the best combination (scores cached) | CPU | 45 min |
-| 20 | report | `runs/v6/RESULTS.md` | | 1 min |
+| 20 | report | `runs/v6/RESULTS.md`, plus the France decoy-word check of the submission | CPU | 5 min |
 
 About 14-17 hours in all. Keep the laptop plugged in, with sleep off, while it runs.
 
+Included by default, from the data audit (`docs/data_audit.md`):
+
+- **Decisions are tuned at test's decoy density.** Test has twice train's decoys per
+  business (ordinary decoys, not orphans), so every run tunes and reports its decision
+  rule with each train decoy counted twice (`--decoy-boost 2.0`). The orphan simulation is
+  off (`--drop 0`).
+- **The neural models read accent-folded text.** French test names carry accent noise
+  (ç à ô î …) that train never has.
+- **French addresses get their own rules**: dropped articles, elisions, `N°`, APP/CRS/PASS.
+- **French pseudo-labels skip France-only decoy words**, such as a pool name that adds
+  "Participations" or "Développement". The report counts such merges in the final
+  submission.
+
 ## 4. What you get
 
-- `runs/v6/RESULTS.md`: every holdout macro F0.5 (runs A, B, C, final), the stage-2
-  search with and without the listwise columns, C1/C7 evaluations, the cross-encoder
-  gate reports, and which file to submit.
+- `runs/v6/RESULTS.md` has:
+  - every holdout macro F0.5 (runs A, B, C, final), at test density and at train density;
+  - the stage-2 search with and without the listwise columns;
+  - the C1/C7 evaluations and the cross-encoder gate reports;
+  - the France decoy-word check;
+  - which file to submit.
 - `output-final/matching_results.tsv` and `candidate_pairs.tsv`, already validated:
   the v6 submission. Fallbacks: `output-C/`, `output-B/` (about v4), `output-A/`.
 - **Do not upload to the portal without telling the lead**; paste the RESULTS.md
@@ -87,7 +110,8 @@ About 14-17 hours in all. Keep the laptop plugged in, with sleep off, while it r
 
 - `--large` adds the France-adapted bge-reranker-v2-m3 (568M, Apache-2.0) when the GPU has
   at least 14 GB free: the strongest cross-encoder in the lead's v5.
-- `--drop 0` trains without the orphan simulation, for comparison with v3/v4-style runs.
+- `--decoy-boost 1 --drop 0.186` reproduces the earlier recipe (train density, orphan
+  simulation), for comparison with v4. Pass it on a fresh start or with `--from runA`.
 
 What each model is and why: `docs/nikhil_exp_plan.md`. All the ideas:
 `docs/ideas_worth_trying.md`.

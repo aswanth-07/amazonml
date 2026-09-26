@@ -51,6 +51,81 @@ def rescale_prior(p: np.ndarray, prior: float, new: float) -> np.ndarray:
     return (w1 * p / (w1 * p + w0 * (1 - p))).astype(np.float32)
 
 
+def emulate_decoys(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    p: np.ndarray,
+    labels: np.ndarray,
+    boost: float,
+    seed: int = 0,
+    min_p: float = 0.005,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Candidate pairs at test's decoy density: test has about twice train's decoys per
+    Source 1 business, of the same kinds (docs/data_audit.md, section 1), so a rule tuned at
+    train density merges too readily there.
+
+    Every candidate pool record with no true pair (a decoy) is cloned ``boost - 1`` times on
+    average (the whole part always, the fraction at random per record); a clone keeps its
+    original's pairs, probabilities and label 0, so it competes for the same businesses.
+    Pass exclusive-adjusted probabilities: a decoy then has one live pair, and its clone
+    lands on the same suitor. Pairs under ``min_p`` are not cloned (no tuned rule selects
+    them); true-match counts are unchanged. Returns (rows, p, labels, clones) with the
+    clones' pairs appended."""
+    rows, cols, p = np.asarray(rows), np.asarray(cols), np.asarray(p)
+    labels = np.asarray(labels, dtype=bool)
+    if boost <= 1 or not len(rows):
+        return rows, p, labels, 0
+    owned = np.zeros(int(cols.max()) + 1, dtype=bool)
+    owned[cols[labels]] = True
+    cand = np.flatnonzero(~owned[cols] & (p >= min_p))
+    extra = float(boost) - 1.0
+    whole, frac = int(extra), extra - int(extra)
+    decoys = np.unique(cols[cand])
+    n_clones = whole + (np.random.default_rng(seed).random(len(decoys)) < frac)
+    idx = np.repeat(cand, n_clones[np.searchsorted(decoys, cols[cand])])
+    return (
+        np.concatenate([rows, rows[idx]]),
+        np.concatenate([p, p[idx]]),
+        np.concatenate([labels, np.zeros(len(idx), dtype=bool)]),
+        int(n_clones.sum()),
+    )
+
+
+def tune_at_density(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    p: np.ndarray,
+    labels: np.ndarray,
+    n_true: np.ndarray,
+    tune_on: np.ndarray,
+    report_on: np.ndarray | None,
+    beta: float = 0.5,
+    boost: float = 1.0,
+    seed: int = 0,
+) -> tuple[Rule, dict[str, Any]]:
+    """``tune`` on the pairs as they are (``boost`` <= 1), or at ``emulate_decoys`` density:
+    the rule is tuned on the emulated sample and reported on the emulated holdout, and
+    ``report["decoy_boost"]`` compares it with the rule tuned at train density on both."""
+    if boost <= 1:
+        return tune(rows, p, labels, n_true, tune_on, report_on, beta)
+    base_rule, base = tune(rows, p, labels, n_true, tune_on, report_on, beta)
+    r, q, y, clones = emulate_decoys(rows, cols, p, labels, boost, seed)
+    rule, report = tune(r, q, y, n_true, tune_on, report_on, beta)
+    info: dict[str, Any] = {"boost": boost, "clones": clones, "train_density_rule": base["chosen"]}
+    if report_on is not None and len(report_on):
+        emulated = Scored.build(r, q, y, n_true, report_on)
+        plain = Scored.build(rows, p, labels, n_true, report_on)
+        info.update({
+            "train_density_rule_holdout": base[base_rule.strategy]["holdout"],
+            "train_density_rule_holdout_emulated": emulated.score(base_rule, beta),
+            "chosen_rule_holdout_train_density": plain.score(rule, beta),
+            "chosen_rule_holdout_emulated": report[rule.strategy]["holdout"],
+        })  # fmt: skip
+    report["decoy_boost"] = info
+    log.info("decoy boost %.2f: %s", boost, info)
+    return rule, report
+
+
 @dataclass
 class Rule:
     strategy: str = "threshold"

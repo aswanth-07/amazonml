@@ -36,6 +36,16 @@ Steps (v5's recipe from ``runs/v5_overnight.sh``, from scratch, plus v6's new mo
 
 ``--large`` adds a France-adapted bge-reranker-v2-m3 (568M, Apache-2.0) between steps 10
 and 11 when the GPU has >= 14 GB free (about 3 extra hours).
+
+Data-audit fixes (docs/data_audit.md), on by default:
+- every decision rule and the stage-2 search are tuned at test's decoy density
+  (``--decoy-boost 2.0``: each train decoy counts twice), and the orphan simulation is
+  off (``--drop 0``), since test's extra pool records are ordinary decoys, not orphans;
+- the neural models read accent-folded text (``BER_TEXT_FOLD``, ber.modeltext);
+- French addresses get their own normalisation rules (ber.normalize.address);
+- French pseudo-positives whose pool name adds a France-only decoy word are left out, and
+  the report counts such merges in the final submission (scripts/check_decoy_words.py).
+A run keeps the settings it started with (runs/v6/state.json) when resumed.
 """
 
 from __future__ import annotations
@@ -320,7 +330,8 @@ def common_sets(args, state) -> list[str]:
     p = state["profile"]
     ce_python = f"scale.ce_python='\"{Path(PY).as_posix()}\"'"
     sets = ["scale.emb_dir=artifacts/emb", "scale.k_emb=20", f"scale.train_sample={p['train_sample']}",
-            f"scale.drop_s1_share={args.drop}", f"scale.n_threads={p['n_threads']}",
+            f"scale.drop_s1_share={args.drop}", f"decision.decoy_boost={args.decoy_boost}",
+            f"scale.n_threads={p['n_threads']}",
             f"scale.n_jobs={p['n_jobs']}", f"scale.block_chunk={p['block_chunk']}",
             f"scale.feature_chunk={p['feature_chunk']}", ce_python,
             "scale.ce_pool_context=true", "scale.ce_train_all=true"]  # fmt: skip
@@ -387,7 +398,8 @@ def step_pseudo(args, state) -> None:
     p = state["profile"]
     run([PY, "scripts/make_pseudo_labels.py", "--run", state["run_A"], "--run", state["run_B"],
          "--country", "France", "--data-dir", args.data_dir, "--max-pos", str(p["pseudo_pos"]),
-         "--max-neg", str(p["pseudo_neg"]), "--out", "artifacts/pseudo_france.npz"], "pseudo")  # fmt: skip
+         "--max-neg", str(p["pseudo_neg"]), "--out", "artifacts/pseudo_france.npz",
+         "--drop-decoy-words"], "pseudo")  # fmt: skip
     # unlabelled French pairs on which the gate measures how undecided a model is
     code = (
         "import numpy as np, pandas as pd, sys\n"
@@ -507,7 +519,8 @@ def step_runC(args, state) -> None:
 def search(args, state, only: str | None, out: str) -> None:
     p = state["profile"]
     cmd = [PY, "scripts/stage2_search.py", "--run", state["run_C"], "--threads",
-           str(p["n_threads"]), "--max-sample", str(p["search_sample"]), "--out", out]  # fmt: skip
+           str(p["n_threads"]), "--max-sample", str(p["search_sample"]), "--out", out,
+           "--decoy-boost", str(args.decoy_boost)]  # fmt: skip
     cmd += ["--only", only] if only is not None else ["--mode", "greedy", "--monotone"]
     if args.smoke:
         cmd += ["--rounds", "100", "--stop", "10"]
@@ -580,16 +593,56 @@ def metrics_line(run_dir: str | None) -> str:
             f"{test.get('validation_ok', '-')} | {test.get('predicted_singletons', '-')} |")  # fmt: skip
 
 
+def decoy_info(run_dir: str | None) -> dict:
+    if not run_dir or not (Path(run_dir) / "metrics.json").exists():
+        return {}
+    m = json.loads((Path(run_dir) / "metrics.json").read_text())
+    return m.get("decision", {}).get("decoy_boost", {})
+
+
+def check_decoy_words(args, name: str) -> None:
+    """scripts/check_decoy_words.py on output-<name>: merges whose pool name adds a word only
+    that country's pool leans on (likely false merges no model learned to avoid)."""
+    matching = ROOT / f"output-{name}" / "matching_results.tsv"
+    if matching.exists():
+        run([PY, "scripts/check_decoy_words.py", "--matching", str(matching), "--data-dir",
+             args.data_dir, "--out", str(WORK / f"decoy_words_{name}.json")], "report")  # fmt: skip
+
+
 def step_report(args, state) -> None:
+    for name in ("final", "B"):
+        check_decoy_words(args, name)
     lines = ["# v6 run: results", "",
              f"Machine: `{json.dumps(state.get('hardware', {}))}`", "",
              f"Profile: `{json.dumps(state.get('profile', {}))}`", "",
-             "## Holdout macro F0.5 per run (orphan-simulated holdout, drop "
-             f"{args.drop}; compare with v4 0.99001 and v5 in the handbook)", "",
+             f"## Holdout macro F0.5 per run (at test decoy density x{args.decoy_boost}, "
+             f"orphan drop {args.drop}; the train-density numbers below compare with v4 "
+             "0.99001 and v5 in the handbook)", "",
              "| run | stage 1 | stage 2 | chosen decision | output valid | predicted singletons |",
              "|---|---|---|---|---|---|"]  # fmt: skip
     for key in ("run_A", "run_B", "run_C", "run_final"):
         lines.append(metrics_line(state.get(key)))
+    lines += ["", "Decoy density (tuned at test density vs at train density, holdout):", ""]
+    for key in ("run_A", "run_B", "run_C", "run_final"):
+        lines.append(f"- {key}: `{json.dumps(decoy_info(state.get(key)))}`")
+    for name in ("final", "B"):
+        f = WORK / f"decoy_words_{name}.json"
+        if f.exists():
+            rep = json.loads(f.read_text(encoding="utf-8"))
+            lines += [
+                "",
+                f"## Merges adding a country-only decoy word (output-{name})",
+                "",
+                f"words: `{json.dumps(rep.get('specific_words', {}), ensure_ascii=False)}`",
+                "",
+            ]
+            for c, v in rep.get("countries", {}).items():
+                lines.append(
+                    f"- {c}: {v['adds_specific_word']:,} of {v['predicted_pairs']:,} "
+                    f"predicted pairs ({100 * v['adds_specific_word_share']:.2f}%); "
+                    f"shared copy-noise words {100 * v['adds_shared_word_share']:.2f}%"
+                )
+                lines += [f"  - `{e}`" for e in v.get("examples", [])[:5]]  # fmt: skip
     run_c = Path(state["run_C"]) if state.get("run_C") else None
     if run_c:
         lines += ["", "## Stage-2 families (scripts/stage2_search.py, holdout macro F0.5)", ""]
@@ -623,6 +676,27 @@ def step_report(args, state) -> None:
 
 
 STEP_FUNCS = {name: globals()[f"step_{name}"] for name in STEPS}
+DEFAULTS = {"drop": 0.0, "decoy_boost": 2.0}
+# a run started before these settings existed used the orphan simulation, at train density
+LEGACY = {"drop": 0.186, "decoy_boost": 1.0}
+
+
+def pin_settings(args, state: dict) -> None:
+    """A run keeps the settings it started with, so resumed steps agree with finished ones
+    (stage 1 is reused across runs, and the orphan share changes which entities it saw).
+    ``--from`` a step up to runA redoes every run, so it may change them."""
+    redo = bool(args.start) and STEPS.index(args.start) <= STEPS.index("runA")
+    started = any(k.startswith("run_") for k in state) and not redo
+    pinned = {} if redo else state.get("settings") or (dict(LEGACY) if started else {})
+    for key, default in DEFAULTS.items():
+        asked = getattr(args, key)
+        if started and key in pinned and asked is not None and asked != pinned[key]:
+            raise SystemExit(f"this run started with --{key.replace('_', '-')} {pinned[key]}; "
+                             "use --from runA to redo the runs with a new value, or a fresh clone")  # fmt: skip
+        if key not in pinned or (asked is not None and not started):
+            pinned[key] = asked if asked is not None else default
+        setattr(args, key, pinned[key])
+    state["settings"] = pinned
 
 
 def main() -> int:
@@ -633,7 +707,19 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma-separated steps to run (ignores markers)")
     ap.add_argument("--from", dest="start", default="", help="rerun from this step on")
     ap.add_argument("--large", action="store_true", help="also the France-adapted bge reranker")
-    ap.add_argument("--drop", type=float, default=0.186, help="orphan simulation share")
+    ap.add_argument(
+        "--drop",
+        type=float,
+        default=None,
+        help="orphan simulation share (default 0: test's extra records are decoys, "
+        "not orphans; docs/data_audit.md)",
+    )
+    ap.add_argument(
+        "--decoy-boost",
+        type=float,
+        default=None,
+        help="tune at this decoy density (default 2.0, test's; 1 = train's)",
+    )
     ap.add_argument("--smoke", action="store_true", help="tiny sizes, for synthetic data")
     args = ap.parse_args()
     args.data_dir = Path(args.data_dir).resolve().as_posix()
@@ -655,6 +741,9 @@ def main() -> int:
         )
     state["kind"] = kind
     state["data_dir"] = args.data_dir
+    if args.start and args.start not in STEPS:
+        raise SystemExit(f"unknown step {args.start!r}; steps: {', '.join(STEPS)}")
+    pin_settings(args, state)
     if args.start:
         for s in STEPS[STEPS.index(args.start) :]:
             (WORK / "done" / s).unlink(missing_ok=True)

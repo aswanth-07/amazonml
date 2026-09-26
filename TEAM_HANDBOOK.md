@@ -54,6 +54,30 @@ and training groups built from the raw data on the encoder share, so the holdout
 v5's. Steps 2-4 (training and measuring) moved to Nambi below: Nikhil's laptop cannot run
 them. Plan and evidence: [docs/nikhil_exp_plan.md](docs/nikhil_exp_plan.md).
 
+**Data audit (26 Sep, ~02:00-05:00 IST, Nikhil): [docs/data_audit.md](docs/data_audit.md).**
+
+- **Test's extra pool records are ordinary decoys, not orphans.** Five markers put the
+  test pool's copy share at 0.55-0.61, which means ~2x train's decoys per business. That
+  fits v4's orphan simulation not moving the public score.
+- **Accent noise.** French pool names carry accents (ç à ô …) that train never has, and the
+  encoders read raw text.
+- **French decoy words.** French decoys add words no train record has (Participations,
+  Développement …).
+- **French address normalisation** had gaps.
+
+`nikhil_exp` now does, by default in `run_all.py`: tuning at test decoy density
+(`decision.decoy_boost=2.0`, no orphan drop), accent-folded model text, French address
+rules, and French pseudo-labels without France-only decoy words (plus a check of the
+submission). 254 tests pass.
+
+**Lead, two CPU checks on v5 outputs, minutes each** (run them from a `nikhil_exp`
+checkout; run folders from main work as they are):
+
+- `python scripts/simulate_decoys.py --run runs/<v5> --share 0 --clone 2.0`: the v5
+  rule at test density vs a re-tuned one.
+- `python scripts/check_decoy_words.py --matching <v5 output>/matching_results.tsv --data-dir <dataset>`:
+  French merges that add a decoy word.
+
 ### Nambi Rajan: run v6 end to end on `nikhil_exp` (one command)
 
 Everything is on `nikhil_exp`: **[RUN_NAMBI.md](RUN_NAMBI.md)**. With the dataset and an NVIDIA

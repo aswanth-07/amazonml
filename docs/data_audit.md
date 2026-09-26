@@ -12,6 +12,21 @@ Four findings can cost score; everything else checked out clean (table at the en
 | 3 | French decoys use a **French corporate vocabulary** (Développement, Participations, Holding, Distribution) that never occurs in train | France | check on existing predictions (minutes); one feature or pseudo-label filter |
 | 4 | **French address normaliser gaps**: dropped articles, glued elisions, `N°` → `ndeg`, APP/cours/passage | France | small, France-gated like the région fix |
 
+## What the branch does about it (`nikhil_exp`, on by default in `scripts/run_all.py`)
+
+| # | Fix | Where | Check it on an existing run (CPU, minutes) |
+| --- | --- | --- | --- |
+| 1 | Decision rules and the stage-2 search are tuned **at test decoy density**: every train decoy is cloned once (`decision.decoy_boost=2.0`), and the orphan simulation is off (`--drop 0`). `metrics.json` reports both densities under `decision.decoy_boost`. | `ber.tuning.emulate_decoys` / `tune_at_density`, `scripts/stage2_search.py --decoy-boost` | `python scripts/simulate_decoys.py --run runs/<v5> --share 0 --clone 2.0` prints the v5 rule's holdout at test density and a re-tuned rule's |
+| 2 | The bi-encoder, cross-encoders and listwise models read **accent-folded text** (Latin letters only; other scripts untouched). Each model records `text_fold`, and scoring follows the model, so older models keep reading raw text. `BER_TEXT_FOLD=0` turns it off. | `ber.modeltext`, `ber.normalize.text.fold_latin` | needs retraining (run_all does it from scratch) |
+| 3 | French pseudo-positives whose pool name **adds a France-only pool word** are dropped. The report counts such merges in each submission. Measured on test, the France-only words are associés, développement, distribution, holding, international, participations. | `ber.vocab`, `scripts/make_pseudo_labels.py --drop-decoy-words`, `scripts/check_decoy_words.py` | `python scripts/check_decoy_words.py --matching output/matching_results.tsv --data-dir <dataset>` (about a minute) |
+| 4 | **French address rules**: articles dropped, elisions dropped, `N°`→`no`, APP→apt, cours→crs, passage→pass, Ste→Saint. Only for France and labels never seen; US/India output is unchanged. The table caches are keyed on `NORMALIZE_VERSION`. | `ber.normalize.address` | — |
+
+**Why no veto on decoy words.** Words pool-heavy in every country (com, www, dba,
+formerly, incorporated) are copy noise: 9-13% of train's true copies add one. So only
+country-specific words count, and they are used where a mistake is cheap (pseudo-labels,
+a diagnostic), not as a hard rule. If the check finds thousands of French merges adding
+one, a France veto is the next step.
+
 ## 1. The extra test pool records are decoys, not orphans
 
 Test has 5.53-5.82 pool records per S1 against 4.68 in train. Two explanations were on the

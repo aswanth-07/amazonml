@@ -9,6 +9,11 @@ assignment, tunes the decision rule on the sample's out-of-fold probabilities, a
 the exact macro F0.5 on the holdout entities: the number the handbook compares.
 
     python scripts/stage2_search.py --run runs/<ts>-v4 [--mode auto|all|greedy] [--monotone]
+        [--decoy-boost 2.0]
+
+``--decoy-boost`` tunes and reports every combination at test's decoy density
+(``ber.tuning.emulate_decoys``); ``holdout`` is then the emulated holdout and
+``holdout_train_density`` the same rule on the holdout as it is.
 
 "p1" and "keep" are always in; every other family is optional. ``auto`` tries all
 subsets when there are at most 5 optional families, else a greedy forward selection. The
@@ -30,7 +35,7 @@ import pandas as pd
 
 from ber.matcher import group_folds
 from ber.scale import exclusive_adjust, stage2_family, stage2_monotone
-from ber.tuning import tune
+from ber.tuning import Scored, emulate_decoys, tune
 
 log = logging.getLogger("stage2_search")
 BASE = ("p1", "keep")
@@ -78,6 +83,8 @@ def main() -> int:
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--only", default="", help="evaluate just this comma-separated family set")
     ap.add_argument("--out", default="", help="results TSV (default: <run>/stage2_search.tsv)")
+    ap.add_argument("--decoy-boost", type=float, default=1.0,
+                    help="tune and report at this decoy density (test: ~2.0)")  # fmt: skip
     ap.add_argument("--max-sample", type=int, default=0,
                     help="train and tune on this many sample entities (screening); holdout unchanged")  # fmt: skip
     args = ap.parse_args()
@@ -132,11 +139,18 @@ def main() -> int:
         p, iters = fit_predict(x, use, labels.astype(np.int8), rows, train_mask, folds, n_folds,
                                cfg_params, args.rounds, args.stop, monotone, bags)  # fmt: skip
         adj = exclusive_adjust(rows, cols, p)
-        rule, rep = tune(rows, adj, labels, n_true, sample_ids, holdout_ids)
+        if args.decoy_boost > 1:
+            r_e, q_e, y_e, _ = emulate_decoys(rows, cols, adj, labels, args.decoy_boost, seed)
+            rule, rep = tune(r_e, q_e, y_e, n_true, sample_ids, holdout_ids)
+            plain = Scored.build(rows, adj, labels, n_true, holdout_ids).score(rule)
+        else:
+            rule, rep = tune(rows, adj, labels, n_true, sample_ids, holdout_ids)
+            plain = rep[rule.strategy]["holdout"]
         res = {
             "families": ",".join(sorted(fams)) or "(base)",
             "monotone": monotone, "bags": bags, "n_features": len(use),
             "holdout": rep[rule.strategy]["holdout"], "sample_oof": rep[rule.strategy]["tuned"],
+            "holdout_train_density": plain, "decoy_boost": args.decoy_boost,
             "rule": rule.strategy,
             **{f"holdout_{s}": rep[s]["holdout"] for s in ("threshold", "two_threshold", "expected_f")},
             "mean_best_iter": float(np.mean(iters)), "minutes": round((time.time() - t0) / 60, 1),

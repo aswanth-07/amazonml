@@ -126,6 +126,10 @@ class DecisionConfig:
     # rescale test probabilities to the EM-estimated test positive rate before deciding
     # (Saerens et al. 2002): test has more decoys per Source 1 business than train
     prior_adjust: bool = False
+    # tune the rule at test's decoy density: every train decoy (a candidate record with no
+    # true pair) counts this many times (ber.tuning.emulate_decoys). Test has ~2x train's
+    # decoys per business (docs/data_audit.md); 1.0 tunes at train density
+    decoy_boost: float = 1.0
 
 
 @dataclass

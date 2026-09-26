@@ -31,14 +31,16 @@ import pandas as pd
 
 from ber import schema
 from ber.embed import encoder_mask, load_frames, truth_pairs
+from ber.modeltext import default_fold, model_fold, record_texts
 
 log = logging.getLogger("ber.crossenc")
 
 MAX_LEN = 96
 
 
-def _text(df: pd.DataFrame) -> list[str]:
-    return [f"{n} | {a}" for n, a in zip(df[schema.NAME].tolist(), df[schema.ADDRESS].tolist())]
+def _text(df: pd.DataFrame, fold: bool = False) -> list[str]:
+    """``"name | address"`` per record; ``fold``: Latin accents folded (ber.modeltext)."""
+    return record_texts(df[schema.NAME].tolist(), df[schema.ADDRESS].tolist(), fold)
 
 
 def _model(init: str | Path, head: Path | None = None):
@@ -147,13 +149,14 @@ def train(
     y = np.concatenate([np.ones(len(pos_r), np.float32), np.zeros(len(neg_r), np.float32)])
     pick = rng.permutation(len(rows))[:max_pairs]
     rows, cols, y = rows[pick], cols[pick], y[pick]
-    texts = [(_text(s1), _text(pool))]
+    fold = default_fold()  # recorded below; scoring reads the text the model trained on
+    texts = [(_text(s1, fold), _text(pool, fold))]
     src = np.zeros(len(y), dtype=np.int8)
     if pseudo:
         with np.load(pseudo) as z:
             pr, pc, py = z["rows"].astype(np.int64), z["cols"].astype(np.int64), z["labels"]
         s1b, poolb = load_frames(data_dir, pseudo_split)
-        texts.append((_text(s1b), _text(poolb)))
+        texts.append((_text(s1b, fold), _text(poolb, fold)))
         rows, cols = np.concatenate([rows, pr]), np.concatenate([cols, pc])
         y = np.concatenate([y, py.astype(np.float32)])
         src = np.concatenate([src, np.ones(len(py), dtype=np.int8)])
@@ -219,6 +222,7 @@ def train(
                 "freeze_embeddings": freeze_embeddings,
                 "lr": lr,
                 "steps": n_steps,
+                "text_fold": fold,
                 "seconds": round(time.time() - t0),
             },
             indent=2,
@@ -241,7 +245,8 @@ def score(
     from transformers import AutoTokenizer
 
     s1, pool = load_frames(data_dir, split)
-    ta, tb = _text(s1), _text(pool)
+    fold = model_fold(model_dir)
+    ta, tb = _text(s1, fold), _text(pool, fold)
     dev = torch.device("cuda")
     tok = AutoTokenizer.from_pretrained(model_dir)
     model = _model(model_dir, Path(model_dir) / "head.pt").to(dev).half().eval()

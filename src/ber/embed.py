@@ -37,6 +37,8 @@ import pandas as pd
 
 from ber import schema
 from ber.io import read_source, read_tsv
+from ber.modeltext import default_fold, model_fold
+from ber.modeltext import record_texts as _texts
 
 log = logging.getLogger("ber.embed")
 
@@ -127,10 +129,9 @@ def dense_row_dot(a, b, rows, cols, chunk: int = 200_000, n_threads: int = 8) ->
 
 
 # ----------------------------------------------------------------------------- data
-def record_texts(df: pd.DataFrame) -> list[str]:
-    return [
-        f"query: {n} | {a}" for n, a in zip(df[schema.NAME].tolist(), df[schema.ADDRESS].tolist())
-    ]
+def record_texts(df: pd.DataFrame, fold: bool = False) -> list[str]:
+    """``"query: name | address"`` per record; ``fold``: Latin accents folded (ber.modeltext)."""
+    return _texts(df[schema.NAME].tolist(), df[schema.ADDRESS].tolist(), fold, prefix="query: ")
 
 
 def load_frames(data_dir: str | Path, split: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -290,8 +291,9 @@ def finetune(
         hard[r[order][first]] = col[order][first]  # overrides the token-blocking negative
         log.info("embedding-neighbour hard negatives for %d entities", int((hard >= 0).sum()))
 
-    s1_text = record_texts(s1)
-    pool_text = record_texts(pool)
+    fold = default_fold()
+    s1_text = record_texts(s1, fold)
+    pool_text = record_texts(pool, fold)
     country = countries(s1)[a]
     # Hard in-batch negatives: sort by country, area (the last address component: state,
     # city or PIN) and then name, so a batch holds same-area businesses with similar names.
@@ -396,6 +398,7 @@ def finetune(
                 "encoder_share": ENCODER_SHARE,
                 "hard_negatives": bool((hard >= 0).any()),
                 "skipped_batches": skipped,
+                "text_fold": fold,
                 "seconds": round(time.time() - t0),
             },
             indent=2,
@@ -470,9 +473,10 @@ def run_split(data_dir, split: str, model_dir, emb_dir, k: int, k_reverse: int) 
     p = emb_paths(emb_dir, split)
     Path(emb_dir).mkdir(parents=True, exist_ok=True)
     s1, pool = load_frames(data_dir, split)
+    fold = model_fold(model_dir)  # the text the encoder was fine-tuned on
     for key, df in (("s1", s1), ("pool", pool)):  # each side once: a rerun resumes
         if not (p[key].exists() and p[f"{key}_ids"].exists()):
-            encode(model_dir, record_texts(df), out_path=p[key])
+            encode(model_dir, record_texts(df, fold), out_path=p[key])
             np.save(p[f"{key}_ids"], df[schema.ENTITY_ID].to_numpy().astype("U"))
     q = np.load(p["s1"], mmap_mode="r")
     d = np.load(p["pool"], mmap_mode="r")

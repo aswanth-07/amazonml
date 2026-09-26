@@ -181,11 +181,28 @@ FR_REGIONS: dict[str, tuple[str, ...]] = {
     "Provence-Alpes-Côte d'Azur": ("Alpes-de-Haute-Provence", "Hautes-Alpes", "Alpes-Maritimes",
                                    "Bouches-du-Rhône", "Var", "Vaucluse"),
 }  # fmt: skip
-_FR_SEGMENTS: dict[str, str] = {
-    clean(name): clean(region).replace(" ", "")
-    for region, departements in FR_REGIONS.items()
-    for name in (region, *departements)
-}
+# French addresses in the test pool (measured, docs/data_audit.md section 4): "N° 39" (4.9% of
+# pool addresses, never in S1) reads "no 39"; an elided article is dropped rather than glued
+# on ("de l'Intendance" -> "de Intendance", not "de lintendance"), because the pool often
+# drops articles after the street type ("3 R PAIX" for "3 Rue de la Paix": street type +
+# de/du/des in 48.5% of S1 addresses, 31% of pool ones), so articles are dropped as tokens.
+_FR_NUMERO = re.compile(r"\bn\s*[°º]\s*", re.IGNORECASE)
+_FR_ELISION = re.compile(r"\b(?:[ldjmnst]|qu)['’`´]\s*(?=\w)", re.IGNORECASE)
+FR_ARTICLES = frozenset({"de", "du", "des", "la", "le", "les", "l", "d", "au", "aux"})
+# abbreviations only the French pool uses (APP 12, CRS X, PASS X) and Ste for Sainte
+_FR_FORMS = {"app": "apt", "appt": "apt", "cours": "crs", "passage": "pass", "pass": "pass",
+             "ste": "st"}  # fmt: skip
+
+
+def _fr_segment(segment: str) -> str:
+    return _FR_ELISION.sub("", _FR_NUMERO.sub(" no ", segment))
+
+
+_FR_SEGMENTS: dict[str, str] = {}
+for _region, _departements in FR_REGIONS.items():
+    for _name in (_region, *_departements):
+        for _form in (_name, _fr_segment(_name)):  # "Côte-d'Or" either way
+            _FR_SEGMENTS[clean(_form)] = clean(_region).replace(" ", "")
 _NUMBER_SUFFIX = re.compile(r"\b(\d+)(bis|ter|quater)\b")  # "5bis" -> "5 bis", as "5 bis" reads
 
 LANDMARK_WORDS = frozenset({"near", "opp", "behind", "derriere"})
@@ -201,6 +218,8 @@ _MAPS = {
 }
 _DEFAULT_MAP = ({**STREET_FORMS, **US_STATES, **CITY_FORMS}, _US_PHRASES)
 _BASE_ONLY = (_BASE_MAP, [])
+_FR_ONLY = ({**_BASE_MAP, **_FR_FORMS}, [])
+_FR_DROP = DROP | FR_ARTICLES
 
 
 @dataclass(frozen=True)
@@ -233,12 +252,17 @@ def normalize_address(raw: str, transliterate: bool = True, country: str = "") -
     """Normalise one address. ``country`` is a normalised label; it selects state maps only."""
     if not raw:
         return NormalizedAddress("", "", "", "", "")
-    # No label: the historical default (US states). A known label: its own map.
-    # Any other label (France, or a country never seen): street forms only.
-    token_map, country_phrases = _MAPS.get(country, _DEFAULT_MAP if not country else _BASE_ONLY)
-    # French régions/départements only where no country map applies (France, or a label
-    # never seen), so US and Indian addresses normalise exactly as before
-    regions = _FR_SEGMENTS if country and country not in _MAPS else None
+    # No label: the historical default (US states). A known label: its own map. Any other
+    # label (France, or a country never seen): street forms plus the French rules
+    # (régions/départements, N°, elisions, articles, pool abbreviations), so US and Indian
+    # addresses normalise exactly as before
+    french = bool(country) and country not in _MAPS
+    if french:
+        token_map, country_phrases = _FR_ONLY
+    else:
+        token_map, country_phrases = _MAPS.get(country, _DEFAULT_MAP if not country else _BASE_ONLY)
+    regions = _FR_SEGMENTS if french else None
+    drop = _FR_DROP if french else DROP
     postal = sorted(set(extract_postal_codes(raw)))
     postal_set = set(postal)
 
@@ -246,12 +270,14 @@ def normalize_address(raw: str, transliterate: bool = True, country: str = "") -
     core_tokens: list[str] = []
     landmark_tokens: list[str] = []
     for segment in _SEGMENT_SPLIT.split(_PIN_SPACED.sub(r"\1\2", raw)):
+        if french:
+            segment = _fr_segment(segment)
         text = clean(segment, transliterate)
         if regions is not None:
             text = regions.get(text) or _NUMBER_SUFFIX.sub(r"\1 \2", text)
         text = replace_phrases(text, _PHRASES)
         text = replace_phrases(text, country_phrases)
-        tokens = canonical_tokens(text.split(), token_map, DROP)
+        tokens = canonical_tokens(text.split(), token_map, drop)
         tokens = [t if t in postal_set else _strip_zeros(t) for t in tokens]
         if not tokens:
             continue

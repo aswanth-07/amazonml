@@ -50,6 +50,7 @@ from ber.metrics import (
     macro_fbeta,
     precision_recall,
 )
+from ber.normalize import NORMALIZE_VERSION
 from ber.pairfeat import (
     cluster_features,
     collective_features,
@@ -106,6 +107,7 @@ def _cache_key(path: Path, cfg: Config) -> str:
     st = path.stat()
     return _sha(
         f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}|{cfg.normalize.transliterate}|{__version__}"
+        f"|n{NORMALIZE_VERSION}"
     )
 
 
@@ -1230,12 +1232,14 @@ def run(
         _write_json(run_dir / "metrics.json", summary)
 
     # ---- decision rule: tuned on the sample's out-of-fold probabilities, reported on holdout
-    from ber.tuning import tune
+    # (with decision.decoy_boost > 1: at test's decoy density, emulated by cloning decoys)
+    from ber.tuning import tune_at_density
 
     with timed("train: decision rules"):
-        rule, summary["decision"] = tune(
-            sd.rows, adjusted(sd, final_p, cfg), labels, n_true, sample, holdout, cfg.beta
-        )
+        rule, summary["decision"] = tune_at_density(
+            sd.rows, sd.cols, adjusted(sd, final_p, cfg), labels, n_true, sample, holdout,
+            cfg.beta, cfg.decision.decoy_boost, cfg.seed,
+        )  # fmt: skip
     _write_json(run_dir / "metrics.json", summary)
     _report_train(sd, final_p, rule, truth, cfg, run_dir, summary, eligible & ~lw)
     # every pair's final probability, for tuning decision rules offline (``eligible`` leaves

@@ -42,6 +42,7 @@ from pathlib import Path
 import numpy as np
 
 from ber import schema
+from ber.modeltext import default_fold, record_text, record_texts
 
 log = logging.getLogger("ber.listwise")
 
@@ -52,8 +53,9 @@ LEN_CAND = 32  # tokens kept of each candidate (fewer when a large group must fi
 THRESHOLDS = (0.002, 0.005, 0.01, 0.02, 0.02, 0.02, 0.05)  # training: p1 floor drawn per group
 
 
-def texts(df) -> list[str]:
-    return [f"{n} | {a}" for n, a in zip(df[schema.NAME].tolist(), df[schema.ADDRESS].tolist())]
+def texts(df, fold: bool = False) -> list[str]:
+    """``"name | address"`` per record; ``fold``: Latin accents folded (ber.modeltext)."""
+    return record_texts(df[schema.NAME].tolist(), df[schema.ADDRESS].tolist(), fold)
 
 
 # ----------------------------------------------------------------------------- groups (numpy only)
@@ -341,7 +343,7 @@ def keys_of(side: str, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
     return cols if side == "pool" else rows
 
 
-def texts_at(data_dir, split: str, need1: np.ndarray, needp: np.ndarray):
+def texts_at(data_dir, split: str, need1: np.ndarray, needp: np.ndarray, fold: bool = False):
     """("name | address" of the sorted Source 1 positions ``need1``, the same of the sorted
     pool positions ``needp``, number of S1 records, number of pool records), read in chunks
     so memory holds only the needed texts (a full train frame is ~5 GB). Parsing matches
@@ -365,7 +367,7 @@ def texts_at(data_dir, split: str, need1: np.ndarray, needp: np.ndarray):
                 if len(sel):
                     n = chunk[schema.NAME].to_numpy()[sel]
                     a = chunk[schema.ADDRESS].to_numpy()[sel]
-                    out += [f"{x.strip()} | {y.strip()}" for x, y in zip(n, a)]
+                    out += [record_text(x.strip(), y.strip(), fold) for x, y in zip(n, a)]
                 offset = hi
         return out, offset
 
@@ -374,11 +376,11 @@ def texts_at(data_dir, split: str, need1: np.ndarray, needp: np.ndarray):
     return s1_text, pool_text, n1, npool
 
 
-def _stores(tok, data_dir, split, rows, cols, len_s1, len_cand):
+def _stores(tok, data_dir, split, rows, cols, len_s1, len_cand, fold: bool = False):
     """Token stores for the Source 1 and pool records these pairs use, and position -> slot maps."""
     t0 = time.time()
     need1, needp = np.unique(rows), np.unique(cols)
-    s1_text, pool_text, n1, npool = texts_at(data_dir, split, need1, needp)
+    s1_text, pool_text, n1, npool = texts_at(data_dir, split, need1, needp, fold)
     s1_store = TokenStore(tok, s1_text, len_s1)
     pool_store = TokenStore(tok, pool_text, len_cand)
     s1_slot = np.full(n1, -1, np.int64)
@@ -487,7 +489,8 @@ def train(
     dev = _device()
     tok = AutoTokenizer.from_pretrained(init)
     special = _special(tok)
-    stores = _stores(tok, data_dir, "train", rows[use], cols[use], LEN_S1, LEN_CAND)
+    fold = default_fold()  # recorded in the metadata; scoring reads the same text
+    stores = _stores(tok, data_dir, "train", rows[use], cols[use], LEN_S1, LEN_CAND, fold)
     vsel = np.flatnonzero(valid[keys] & (p1 >= 0.02))
     v_enc = _Encoder.for_side(
         side, [Group(g.s1, vsel[g.idx], g.primary) for g in build_groups(keys[vsel], p1[vsel], k, np.random.default_rng(0))],
@@ -548,7 +551,7 @@ def train(
     meta = {"init": str(init), "side": side, "drop_owner": drop_owner, "k": k, "max_len": max_len,
             "len_s1": LEN_S1, "len_cand": LEN_CAND,
             "batch": batch, "lr": lr, "epochs": epochs, "steps": n_steps,
-            "entities": int(ents.sum()), "groups_file": str(groups_path)}  # fmt: skip
+            "entities": int(ents.sum()), "groups_file": str(groups_path), "text_fold": fold}  # fmt: skip
     log.info("validation log-loss before training: %.4f", validate())
     t0 = time.time()
     step, epoch, skipped = 0, 0, 0
@@ -623,7 +626,8 @@ def score(
     tok = AutoTokenizer.from_pretrained(model_dir)
     special = _special(tok)
     groups = build_groups(keys, p1, k, np.random.default_rng(seed))
-    stores = _stores(tok, data_dir, split, rows, cols, len_s1, len_cand)
+    stores = _stores(tok, data_dir, split, rows, cols, len_s1, len_cand,
+                     bool(meta.get("text_fold", False)))  # fmt: skip
     enc = _Encoder.for_side(side, groups, rows, cols, *stores, special, max_len, len_s1, len_cand)
     model = _model(model_dir, model_dir / "heads.pt").to(dev).eval()
     amp = _autocast_dtype()

@@ -8,6 +8,10 @@ from ber import schema
 from ber.normalize.address import normalize_address, normalize_country
 from ber.normalize.name import normalize_name
 
+# Bump whenever normalised output changes for any record: cached tables are keyed on it.
+# 2: French rules (N°, elisions, articles, APP/CRS/PASS/Ste), Sep 2026.
+NORMALIZE_VERSION = 2
+
 NORMALIZED_COLUMNS = (
     "name_clean",
     "name_core",

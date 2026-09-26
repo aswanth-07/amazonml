@@ -22,6 +22,37 @@ def fold_accents(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
+@lru_cache(maxsize=4096)
+def _fold_latin_char(ch: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", ch) if not unicodedata.combining(c))
+
+
+def _latin_with_marks(o: int) -> bool:
+    # Latin-1 Supplement, Latin Extended-A/B, Latin Extended Additional
+    return 0x80 <= o < 0x250 or 0x1E00 <= o < 0x1F00
+
+
+def fold_latin(text: str) -> str:
+    """Drop the diacritics of Latin letters only: ``"Çlub Spôrtive"`` -> ``"Club Sportive"``.
+
+    Unlike ``fold_accents`` it leaves every other script alone (Devanagari vowel signs and
+    viramas are combining marks too), keeps letters without a decomposition (ß, ø, œ) and
+    changes nothing else, so it is safe on text a neural model reads as is."""
+    if text.isascii():
+        return text
+    out: list[str] = []
+    for ch in text:
+        if _latin_with_marks(ord(ch)):
+            out.append(_fold_latin_char(ch))
+        elif (
+            unicodedata.combining(ch) and out and out[-1][-1:].isascii() and out[-1][-1:].isalpha()
+        ):
+            continue  # a separate mark on a Latin letter ("e" + U+0301)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 @lru_cache(maxsize=1_000_000)
 def clean(text: str, transliterate: bool = True) -> str:
     """Lowercase ASCII, ``&`` spelled out, dotted acronyms joined, other punctuation to spaces.
