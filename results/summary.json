@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "project": "business-entity-resolution",
+  "competition": {
+    "name": "Amazon ML Challenge 2026",
+    "task": "Business Entity Resolution",
+    "team": "PerryDaPlatypus",
+    "members": [
+      {
+        "name": "A Aswanth Raj",
+        "role": "Team Lead",
+        "contributions": "Core pipeline, TF-IDF + e5-small bi-encoder kNN, pair/collective features, bipartite Stage-1/2 stacking, cascaded cross-encoders, learned 4-stage pruning cascade, 4-round gated France adaptation, copy simulator, France rules, lookalike vetoes, training runs"
+      },
+      {
+        "name": "V Nikhil",
+        "role": "Team Member",
+        "contributions": "Train/test data audit (2x decoy shift, French accents & decoy vocab), 2x decoy-density threshold tuning (emulate_decoys), ber.vocab, accent-folded ber.modeltext, Stage-2 source fingerprints, score caching, C1/C7 listwise rerankers (Round-3 lineage), set-model co-development"
+      },
+      {
+        "name": "Nambi Rajan",
+        "role": "Team Member",
+        "contributions": "Parallel GPU experimentation and co-development of off-main whole-candidate-set neural model (0.99145 held-out US/India; 0.990342 backup public LB filter)"
+      }
+    ],
+    "standing": "Top 50 Team",
+    "registrations": "89,000+",
+    "teams": "32,000+",
+    "top_percentile_upper_bound": 0.16,
+    "certificate_date": "2026-10-07",
+    "submission_date": "2026-09-28",
+    "license": "Apache-2.0"
+  },
+  "hardware": {
+    "machine": "Single laptop workstation",
+    "cpu_threads": 24,
+    "ram_gb": 31,
+    "gpu": "NVIDIA RTX 5080 Laptop GPU (16 GB VRAM)",
+    "full_chain_hours_approx": 57
+  },
+  "dataset": {
+    "train": {
+      "source1_entities": 2206821,
+      "source2_3_pool_records": 10320219,
+      "countries": ["US", "India"],
+      "mean_true_matches_per_entity": 3.46,
+      "singleton_share": 0.056,
+      "decoy_share_approx": 0.26,
+      "eligible_matcher_entities": 1325242,
+      "encoder_share": 0.4
+    },
+    "test": {
+      "source1_entities": 1732544,
+      "source2_3_pool_records": 9969589,
+      "countries": ["US", "India", "France"],
+      "unseen_country": "France",
+      "unseen_country_share_approx": 0.15,
+      "pool_per_s1_ratio_vs_train": "5.5-5.8 vs 4.68 (~2x decoys per entity)"
+    }
+  },
+  "headline": {
+    "submitted_version": "v11-hL1",
+    "public_leaderboard_macro_f05": 0.990376,
+    "held_out_us_india_macro_f05": 0.991177,
+    "held_out_us_india_entities": 330293,
+    "eligible_us_india_macro_f05": 0.991203,
+    "eligible_us_india_entities": 1325242,
+    "test_candidates_per_s1": 3.84,
+    "test_candidate_pairs_total": 6650585,
+    "test_matched_pairs_per_s1": 3.37,
+    "holdout_cascade_pair_recall": 0.992497,
+    "search_union_pair_recall": 0.995869,
+    "search_union_oracle_f05": 0.998819
+  },
+  "candidate_cascade": [
+    {
+      "stage": "Multi-view TF-IDF + e5-small GPU kNN union",
+      "train_per_s1": 39.52,
+      "test_per_s1": 38.46,
+      "holdout_pair_recall": 0.9959,
+      "notes": "66,627,841 test pairs (99.9996% reduction ratio); oracle macro F0.5 0.9988; bi-encoder alone @10 0.9885, @20 0.9936, @50 0.9963"
+    },
+    {
+      "stage": "Stage 1 LightGBM filter (p1 >= 0.02)",
+      "train_per_s1": 4.07,
+      "test_per_s1": 4.58,
+      "holdout_pair_recall": 0.9925,
+      "notes": "80-feature GBDT over cheap string, token, numeric, collective, and group-context features"
+    },
+    {
+      "stage": "Small cross-encoder cut (e5-small >= 0.001)",
+      "train_per_s1": 3.93,
+      "test_per_s1": 3.89,
+      "holdout_pair_recall": 0.9925,
+      "notes": "Byte-identical matching output; cuts France candidates from 4.81 to 3.62"
+    },
+    {
+      "stage": "Large cross-encoder cut (bge-reranker-v2-m3 >= 0.001 on uncertain band) + France rule add-back",
+      "train_per_s1": 3.9,
+      "test_per_s1": 3.84,
+      "holdout_pair_recall": 0.9925,
+      "notes": "6,650,585 test candidates (US 3.96, India 3.82, France 3.59 incl. 14,203 add-backs); bge runs only on ~19% uncertain pairs in (0.001, 0.999)"
+    }
+  ],
+  "fixed_topk_comparison": {
+    "fixed_top_5_candidates_per_s1": 3.63,
+    "fixed_top_5_f05_delta": -0.0056,
+    "learned_cascade_candidates_per_s1": 3.84,
+    "learned_cascade_f05_delta": 0.0,
+    "reason": "True businesses carry up to 11 valid copies across Sources 2 and 3, so fixed top-k truncates high-cardinality entities"
+  },
+  "version_progression": [
+    {
+      "version": "v1",
+      "change": "Token blocking + LightGBM + stacking baseline",
+      "holdout_f05": 0.9645,
+      "public_f05": 0.947,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "v3",
+      "change": "Fine-tuned bi-encoder kNN, detail & collective features, e5-small cross-encoder, two-threshold F0.5 rule",
+      "holdout_f05": 0.9906,
+      "public_f05": 0.984,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "v4",
+      "change": "Orphan simulation (independent teacher for round-1 France pseudo labels)",
+      "holdout_f05": 0.99,
+      "public_f05": 0.984,
+      "orphan_simulated_holdout": true
+    },
+    {
+      "version": "v5",
+      "change": "Round-1 France self-training, bge-reranker-v2-m3 cascade, pool-side CE context, name clusters, k_emb=20",
+      "holdout_f05": 0.9907,
+      "public_f05": 0.987405,
+      "orphan_simulated_holdout": true
+    },
+    {
+      "version": "v6a-fr",
+      "change": "Round-2 France self-training, decoy-word filter, 3-seed bagged stage 2, candidate cascade, France log-odds/rescue/namesake rules",
+      "holdout_f05": 0.9908,
+      "public_f05": 0.987583,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "v6a-rep",
+      "change": "France replace-copy probability floor",
+      "holdout_f05": 0.9908,
+      "public_f05": 0.988329,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "v6a-rep-d",
+      "change": "Decision thresholds re-tuned at 2x test decoy density (t_rest 0.74 -> 0.82)",
+      "holdout_f05": 0.9908,
+      "public_f05": 0.988395,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "v6a-rdb",
+      "change": "France same-address word-swap decoy rejection",
+      "holdout_f05": 0.9908,
+      "public_f05": 0.989316,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "hybrid-L",
+      "change": "Per-country combination (v9 US/India with lookalike veto + v6a France)",
+      "holdout_f05": 0.9911,
+      "public_f05": 0.990171,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "hybrid-L1",
+      "change": "US legal-form + changed-house-number lookalike veto (-2,386 pairs)",
+      "holdout_f05": 0.991,
+      "public_f05": 0.99026,
+      "orphan_simulated_holdout": false
+    },
+    {
+      "version": "v11-hL1 (final)",
+      "change": "Round-4 cross-encoders trained on expanded US/India + rule-corrected French labels",
+      "holdout_f05": 0.9912,
+      "public_f05": 0.990376,
+      "orphan_simulated_holdout": false
+    }
+  ],
+  "v11_holdout_breakdown": {
+    "stage2_holdout_entities": 330293,
+    "decision_rules_holdout": {
+      "single_threshold": { "t": 0.74, "holdout_f05": 0.991041 },
+      "two_threshold": { "t_top": 0.52, "t_rest": 0.76, "holdout_f05": 0.991177 },
+      "expected_f": { "min_prob": 0.0, "miss": 0.0, "holdout_f05": 0.991231 }
+    },
+    "eligible_entities": 1325242,
+    "overall_macro_f05": 0.991203,
+    "pair_precision": 0.998595,
+    "pair_recall": 0.97574,
+    "singleton_accuracy": 0.993782,
+    "by_country": {
+      "india": { "macro_f05": 0.99213, "entities": 530218 },
+      "united_states": { "macro_f05": 0.990586, "entities": 795024 }
+    },
+    "by_true_cardinality": {
+      "0_singletons": { "macro_f05": 0.993782, "entities": 74137 },
+      "1_copy": { "macro_f05": 0.970496, "entities": 71611 },
+      "2_copies": { "macro_f05": 0.989733, "entities": 225105 },
+      "3_plus_copies": { "macro_f05": 0.992904, "entities": 954389 }
+    }
+  },
+  "stage2_v11_feature_gain_top5": [
+    { "feature": "ce2_margin_pool", "gain_share": 0.6047, "role": "BGE score margin over rival Source 1 suitors for the same pool record" },
+    { "feature": "ce_margin_pool", "gain_share": 0.2461, "role": "e5-small score margin over rival Source 1 suitors" },
+    { "feature": "p1", "gain_share": 0.051, "role": "Stage 1 LightGBM probability" },
+    { "feature": "ce2", "gain_share": 0.0442, "role": "Raw bge-reranker-v2-m3 probability" },
+    { "feature": "ce", "gain_share": 0.0224, "role": "Raw e5-small cross-encoder probability" }
+  ],
+  "adaptation_gates_600k_us_india": [
+    {
+      "model": "e5-small baseline (ce-best)",
+      "round": "Base",
+      "us_india_logloss": 0.01386,
+      "us_india_auc": 0.99985,
+      "france_uncertain_share": 0.1624,
+      "promoted": true
+    },
+    {
+      "model": "ce-small-fr",
+      "round": "Round 1",
+      "us_india_logloss": 0.0133,
+      "us_india_auc": 0.99987,
+      "france_uncertain_share": 0.037,
+      "promoted": true
+    },
+    {
+      "model": "ce-small-fr2",
+      "round": "Round 2",
+      "us_india_logloss": 0.01343,
+      "us_india_auc": 0.99986,
+      "france_uncertain_share": 0.0199,
+      "promoted": true
+    },
+    {
+      "model": "ce-small-fr3",
+      "round": "Round 3",
+      "us_india_logloss": 0.01339,
+      "us_india_auc": 0.99987,
+      "france_uncertain_share": 0.017,
+      "promoted": true
+    },
+    {
+      "model": "v9-small (synthetic French)",
+      "round": "Round 3b",
+      "us_india_logloss": 0.01313,
+      "us_india_auc": 0.99987,
+      "france_uncertain_share": 0.0846,
+      "promoted": true
+    },
+    {
+      "model": "v11-small (ce-small-r4)",
+      "round": "Round 4",
+      "us_india_logloss": 0.01176,
+      "us_india_auc": 0.9999,
+      "france_uncertain_share": null,
+      "promoted": true
+    },
+    {
+      "model": "e5-base reference (ce-base)",
+      "round": "Base ref",
+      "us_india_logloss": 0.01187,
+      "us_india_auc": 0.99988,
+      "france_uncertain_share": 0.1523,
+      "promoted": true
+    },
+    {
+      "model": "ce-bge-fr",
+      "round": "Round 1",
+      "us_india_logloss": 0.01226,
+      "us_india_auc": 0.99988,
+      "france_uncertain_share": 0.0229,
+      "promoted": true
+    },
+    {
+      "model": "ce-bge-fr2",
+      "round": "Round 2",
+      "us_india_logloss": 0.01127,
+      "us_india_auc": 0.99989,
+      "france_uncertain_share": 0.0085,
+      "promoted": true
+    },
+    {
+      "model": "ce-bge-fr3",
+      "round": "Round 3",
+      "us_india_logloss": 0.01137,
+      "us_india_auc": 0.9999,
+      "france_uncertain_share": 0.0089,
+      "promoted": true
+    },
+    {
+      "model": "bge-syn2 (synthetic French)",
+      "round": "Round 3b",
+      "us_india_logloss": 0.01345,
+      "us_india_auc": 0.99986,
+      "france_uncertain_share": null,
+      "promoted": false
+    },
+    {
+      "model": "v11-large (ce-bge-fr4)",
+      "round": "Round 4",
+      "us_india_logloss": 0.01093,
+      "us_india_auc": 0.9999,
+      "france_uncertain_share": null,
+      "promoted": true
+    }
+  ],
+  "rejected_experiments": [
+    {
+      "idea": "Averaging two runs' probabilities",
+      "outcome": "+0.00004 on holdout; negligible, not shipped"
+    },
+    {
+      "idea": "Per-country or per-group decision rules",
+      "outcome": "-0.00002 on holdout"
+    },
+    {
+      "idea": "Forcing each address-less record onto its likeliest suitor",
+      "outcome": "-0.00047 on holdout"
+    },
+    {
+      "idea": "Listwise reranker as a stage-2 feature",
+      "outcome": "Public LB 0.985907 vs 0.987583 baseline; accepted 27.8k planted US lookalikes"
+    },
+    {
+      "idea": "Whole-candidate-set model per business",
+      "outcome": "Public LB 0.989257 vs 0.990376 final"
+    }
+  ]
+}

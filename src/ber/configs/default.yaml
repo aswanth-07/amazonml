@@ -1,0 +1,88 @@
+# Default configuration. Mirrors the dataclass defaults in ber/config.py
+# (tests/test_config.py fails if the two drift). Copy this file to create an
+# experiment config, or override single keys with --set key.path=value.
+
+seed: 42
+beta: 0.5                    # F-beta of the leaderboard (precision-heavy)
+output_dir: output
+runs_dir: runs
+artifacts_dir: artifacts
+
+data:
+  data_dir: dataset          # expects dataset/train/... and dataset/test/...
+  quoting: none              # none: quotes are literal text; minimal: honour CSV quoting
+
+normalize:
+  transliterate: true        # anyascii for non-Latin scripts; accents are always folded
+
+blocking:
+  partition_by_country: true # candidates share the S1 record's country (unknown country joins all)
+
+model:
+  n_folds: 5                 # GroupKFold over S1 entities for out-of-fold scoring
+  num_boost_round: 2000
+  early_stopping_rounds: 100
+  params:
+    objective: binary
+    learning_rate: 0.05
+    num_leaves: 63
+    min_data_in_leaf: 20
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    lambda_l2: 1.0
+    verbosity: -1
+
+scale:                       # the pipeline `python -m ber.cli run` runs
+  k: 20                      # kept per Source 1 entity by combined cosine after re-scoring
+  k_name: 8                  # ... plus its best by name cosine
+  k_addr: 8                  # ... plus its best by address cosine
+  k_reverse: 1               # ... plus each pool record's best Source 1 suitors
+  generate: 100              # wide first pass, combined view (rare tokens only)
+  generate_name: 50          # wide first pass, name view
+  generate_addr: 50          # wide first pass, address view
+  generate_reverse: 5        # wide first pass per pool query (reverse); 0 disables
+  name_weight: 0.6           # name vs address weight in the blocking vector
+  df_cap: 5000               # query tokens more frequent than this in the pool are not searched on
+  query_budget: 6000         # prefix filter: search on each query's rarest tokens up to this summed df
+  n_threads: 16
+  n_jobs: 12
+  chunk_rows: 500
+  block_chunk: 200000        # S1 queries searched, re-scored and selected per pass (bounds memory)
+  train_sample: 300000       # Source 1 entities whose candidates train the matcher
+  feature_chunk: 2000000
+  cache_dir: artifacts/cache
+  emb_dir: ""                # embeddings + kNN lists from `python -m ber.embed all`; "" disables
+  k_emb: 10                  # candidates added per S1 from its embedding kNN list
+  k_emb_reverse: 1           # ... plus each pool record's best S1 suitors by embedding
+  ce_model: ""               # cross-encoder from `python -m ber.crossenc train`; "" disables
+  ce_python: py -3.13        # interpreter with torch + transformers that runs it
+  ce_min_p1: 0.02            # cross-encoder scores pairs with stage-1 probability >= this
+  ce_wait: 0                 # seconds to wait for a cross-encoder that is still training
+  ce_pool_context: false     # cross-encoder rank/gap/margin among a pool record's suitors
+  ce_train_all: false        # train: cross-encode every entity's pairs, not only eligible ones
+  candidate_min_p1: 0.0      # stage 1 as last blocking stage: candidates are pairs with p1 >= this
+  candidate_min_ce: 0.0      # then the small cross-encoder drops candidates it scores below this
+  candidate_min_ce2: 0.0     # then the large cross-encoder drops band pairs it scores below this
+  stage2_min_p1: 0.0         # stage 2 trains only on pairs with p1 >= this
+  stage2_extra: 0.0          # share of holdout entities stage 2 also learns from
+  stage2_bags: 1             # stage-2 models per fold (seed bagging)
+  ce_band: ""                # "lo,hi": later cross-encoders score only pairs the first is unsure of
+  stage1_model: ""           # a previous run's scale_model.joblib whose stage 1 is reused
+  feature_donor_run: ""      # a previous run directory whose cached features are reused
+  drop_s1_share: 0.0         # train only: share of S1 businesses removed (simulates test's orphaned copies)
+  drop_seed: 7
+  fingerprint: false         # stage-2 columns: does a candidate carry its source's variant of the address (fp_*)
+
+decision:                    # exclusive: each S2/S3 record goes to at most one S1 entity
+  grid_min: 0.02
+  grid_max: 0.98
+  grid_step: 0.01
+  decoy_boost: 1.0           # tune at test decoy density: each train decoy counts this often (test has ~2x)
+  country_logit_shift: ""    # "country:shift,...": log-odds shift of one country's probabilities before deciding
+  rescue_countries: ""       # countries whose same-address pool-heavy-word copies are floored (ber.rescue)
+  rescue_floor: 0.8          # the floor for those pairs' final probability
+  replace_words: ""          # "country:word|word": same-address one-word replace copies, floored too (ber.rescue)
+  swap_decoy_shift: ""       # "country:shift": in-place same-address swaps to a common S1 word (ber.rescue)
+  swap_anywhere: false       # swap_decoy_shift also on swaps whose new word ends the name
+  namesake_shift: ""         # "country:shift": log-odds shift of address-less copies of shared names

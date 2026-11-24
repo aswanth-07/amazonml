@@ -1,0 +1,16 @@
+# Environment for the GPU steps (ber.embed: encoder fine-tuning, encoding, kNN;
+# ber.crossenc: cross-encoder training and scoring). Used here with Python 3.13
+# and CUDA 13; install PyTorch from its CUDA wheel index, e.g.
+#   pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+#   pip install -r requirements-gpu.txt
+# The main pipeline (requirements.txt) never imports torch; it reads the arrays
+# these steps write and calls the scorer through `scale.ce_python`.
+torch==2.11.0
+transformers==5.5.4
+tokenizers==0.22.2
+safetensors==0.7.0
+huggingface_hub==1.11.0
+numpy==2.2.6
+pandas==2.2.3
+scipy==1.15.3
+joblib==1.5.1

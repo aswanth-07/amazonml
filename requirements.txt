@@ -1,0 +1,17 @@
+# Runtime environment the pipeline was built and tested with (Python 3.10).
+# Exact pins so the submission reproduces bit-for-bit. Licences: all permissive
+# (BSD/MIT/ISC/Apache-2.0); the only model is LightGBM (MIT).
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+scikit-learn==1.7.2
+lightgbm==4.7.0
+rapidfuzz==3.14.5
+anyascii==0.3.3
+pyyaml==6.0.3
+joblib==1.6.0
+threadpoolctl==3.7.0
+python-dateutil==2.9.0.post0
+pytz==2026.4
+tzdata==2026.4
+six==1.17.0
