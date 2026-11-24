@@ -254,7 +254,7 @@ scores, feature importance and error tables.
 
 **PerryDaPlatypus** (Amazon ML Challenge 2026, Top 50 of 32,000+ teams):
 
-- **A Aswanth Raj (Team Lead):** Core architecture, multi-view TF-IDF blocking and contrastively
+- **[A Aswanth Raj](https://github.com/aswanth-07) (Team Lead):** Core architecture, multi-view TF-IDF blocking and contrastively
   fine-tuned `e5-small` bi-encoder GPU kNN (`embed.py`), pair/collective features (`pairfeat.py`),
   Stage-1/Stage-2 bipartite group-context LightGBM stacking and 3-seed bagging, cascaded dual
   cross-encoders (`crossenc.py`, `bge-reranker-v2-m3` in 16 GB VRAM), learned 4-stage candidate
@@ -262,14 +262,14 @@ scores, feature importance and error tables.
   (`ce_gate.py`), synthetic French copy simulator (`synth_france.py`), France decision rules
   (`rescue.py`), per-country lookalike vetoes (`combine_by_country.py`), end-to-end training runs,
   and final submission packaging.
-- **V Nikhil:** Train/test data audit establishing the ~2x test decoy-density shift, unseen French
+- **[V Nikhil](https://github.com/Nikhi00718):** Train/test data audit establishing the ~2x test decoy-density shift, unseen French
   accent noise, and France-only corporate decoy vocabulary; shipped final-pipeline components
   including 2x decoy-density threshold emulation (`ber.tuning.emulate_decoys`), country-specific
   pool-heavy vocabulary (`ber.vocab`), Latin accent-folded model text (`ber.modeltext`,
   `fold_latin`), Stage-2 source-fingerprint features (`scale.fingerprint`), score caching/ablation
   tooling, and the C1/C7 listwise rerankers (`ber.listwise`, `make_lw_groups.py`, used in run v7 to
   feed Round-3 pseudo labels).
-- **Nambi Rajan:** Parallel GPU experimentation and co-development (with V Nikhil, off-`main`) of
+- **[Nambi Rajan](https://github.com/guyoverclocked):** Parallel GPU experimentation and co-development (with [V Nikhil](https://github.com/Nikhi00718), off-`main`) of
   the whole-candidate-set neural model evaluated against `v11` (reached 0.99145 held-out US/India
   macro F0.5 and 0.990342 public LB as a conservative disagreement filter, confirming `v11-hL1` at
   0.990376 as the final submission).
